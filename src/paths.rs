@@ -283,9 +283,61 @@ pub(crate) fn ensure_private_db(db_path: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
+/// Maximum symlink hops followed when resolving an atomic-write target. Bounded
+/// so a symlink cycle fails loudly instead of spinning.
+const MAX_WRITE_SYMLINK_HOPS: usize = 8;
+
+/// Resolve the path an atomic write should actually land on, following symlinks.
+///
+/// `atomic_write_io` replaces its target by rename, and a rename onto a symlink
+/// REPLACES THE LINK with a regular file. That silently detaches config files
+/// which users symlink into a dotfiles repo (`~/.claude/settings.json` ->
+/// `~/dotfiles/claude/settings.json`): the edit lands in a new local file, the
+/// repo copy stops receiving updates, and the two diverge with no error and no
+/// warning. Following the link first means the write updates the file the user
+/// actually pointed at, and the link survives.
+///
+/// A dangling link resolves to its missing target on purpose: that is the
+/// "linked into a checkout that has not created the file yet" case, where
+/// creating the target is what the user meant.
+fn resolve_write_target(filepath: &Path) -> std::io::Result<PathBuf> {
+    let mut current = filepath.to_path_buf();
+    for _ in 0..MAX_WRITE_SYMLINK_HOPS {
+        // symlink_metadata does not follow links, so this inspects the link itself.
+        let Ok(metadata) = fs::symlink_metadata(&current) else {
+            // Nothing there, or unreadable: write to the path as given.
+            return Ok(current);
+        };
+        if !metadata.file_type().is_symlink() {
+            return Ok(current);
+        }
+        let destination = fs::read_link(&current)?;
+        current = if destination.is_absolute() {
+            destination
+        } else {
+            match current.parent() {
+                Some(parent) => parent.join(destination),
+                None => destination,
+            }
+        };
+    }
+    Err(std::io::Error::new(
+        std::io::ErrorKind::InvalidInput,
+        format!(
+            "symlink chain at {} exceeds {MAX_WRITE_SYMLINK_HOPS} hops",
+            filepath.display()
+        ),
+    ))
+}
+
 /// Write content to file atomically (temp file + rename).
 /// Returns the underlying IO error on failure for callers that need error detail.
 pub fn atomic_write_io(filepath: &Path, content: &str) -> std::io::Result<()> {
+    // Follow symlinks before writing: renaming onto a link would destroy it and
+    // detach a user's symlinked config (see resolve_write_target).
+    let resolved = resolve_write_target(filepath)?;
+    let filepath = resolved.as_path();
+
     // Ensure parent directory exists
     if let Some(parent) = filepath.parent() {
         fs::create_dir_all(parent)?;
@@ -391,6 +443,91 @@ mod tests {
             .join(".hcom")
             .join("hcom.db");
         assert!(!is_test_temp_path(&escape));
+    }
+
+    #[test]
+    fn test_atomic_write_io_replaces_plain_file() {
+        let tmp = TempDir::new().unwrap();
+        let target = tmp.path().join("settings.json");
+        fs::write(&target, "old").unwrap();
+        atomic_write_io(&target, "new").unwrap();
+        assert_eq!(fs::read_to_string(&target).unwrap(), "new");
+        assert!(!fs::symlink_metadata(&target).unwrap().is_symlink());
+    }
+
+    /// Regression: a rename onto a symlink used to replace the link with a
+    /// regular file, detaching config that users link into a dotfiles repo.
+    #[cfg(unix)]
+    #[test]
+    fn test_atomic_write_io_writes_through_symlink_and_keeps_link() {
+        let tmp = TempDir::new().unwrap();
+        let repo = tmp.path().join("repo");
+        let live = tmp.path().join("live");
+        fs::create_dir_all(&repo).unwrap();
+        fs::create_dir_all(&live).unwrap();
+        let real = repo.join("settings.json");
+        let link = live.join("settings.json");
+        fs::write(&real, "from-repo").unwrap();
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+
+        atomic_write_io(&link, "written-by-hcom").unwrap();
+
+        assert!(
+            fs::symlink_metadata(&link).unwrap().is_symlink(),
+            "the symlink must survive an atomic write"
+        );
+        assert_eq!(
+            fs::read_to_string(&real).unwrap(),
+            "written-by-hcom",
+            "content must land in the link target, not a new local file"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_atomic_write_io_follows_relative_symlink() {
+        let tmp = TempDir::new().unwrap();
+        let real = tmp.path().join("target.json");
+        let link = tmp.path().join("link.json");
+        fs::write(&real, "before").unwrap();
+        // Relative destinations resolve against the link's own directory.
+        std::os::unix::fs::symlink("target.json", &link).unwrap();
+
+        atomic_write_io(&link, "after").unwrap();
+
+        assert!(fs::symlink_metadata(&link).unwrap().is_symlink());
+        assert_eq!(fs::read_to_string(&real).unwrap(), "after");
+    }
+
+    /// A link into a checkout that has not created the file yet must create the
+    /// target, not clobber the link.
+    #[cfg(unix)]
+    #[test]
+    fn test_atomic_write_io_creates_dangling_symlink_target() {
+        let tmp = TempDir::new().unwrap();
+        let missing = tmp.path().join("not-yet").join("settings.json");
+        let link = tmp.path().join("settings.json");
+        std::os::unix::fs::symlink(&missing, &link).unwrap();
+
+        atomic_write_io(&link, "created").unwrap();
+
+        assert!(fs::symlink_metadata(&link).unwrap().is_symlink());
+        assert_eq!(fs::read_to_string(&missing).unwrap(), "created");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_atomic_write_io_rejects_symlink_cycle() {
+        let tmp = TempDir::new().unwrap();
+        let first = tmp.path().join("a");
+        let second = tmp.path().join("b");
+        std::os::unix::fs::symlink(&second, &first).unwrap();
+        std::os::unix::fs::symlink(&first, &second).unwrap();
+
+        // Fails loudly rather than spinning or silently clobbering a link.
+        let err = atomic_write_io(&first, "content").unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
+        assert!(err.to_string().contains("symlink chain"));
     }
 
     #[test]
