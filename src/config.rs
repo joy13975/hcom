@@ -1608,9 +1608,12 @@ fn format_env_value(value: &str) -> String {
     }
 }
 
-/// Atomic write: delegates to paths::atomic_write_io (preserves error detail).
+/// Atomic write for user-maintained config files (`~/.hcom/env`, config.toml).
+/// Follows a symlink at the target so a dotfiles-repo link the user created
+/// survives the write (preserves error detail). Internal state files use the
+/// no-follow `paths::atomic_write_io` instead.
 fn atomic_write(path: &std::path::Path, content: &str) -> std::io::Result<()> {
-    crate::paths::atomic_write_io(path, content)
+    crate::paths::atomic_write_following_symlinks_io(path, content)
 }
 
 pub fn write_config_toml_path(path: &std::path::Path, content: &str) -> std::io::Result<()> {

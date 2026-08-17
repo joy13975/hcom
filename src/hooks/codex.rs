@@ -1553,7 +1553,8 @@ fn write_hcom_hook_trust_state(
     if let Some(parent) = config_path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
-    paths::atomic_write_io(config_path, &doc.to_string()).map_err(|e| e.to_string())
+    paths::atomic_write_following_symlinks_io(config_path, &doc.to_string())
+        .map_err(|e| e.to_string())
 }
 
 /// Rewrite hcom's own `hooks.state` entries from an authoritative hooks/list
@@ -2107,7 +2108,7 @@ fn ensure_codex_feature_enabled(
     if let Some(parent) = config_path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
-    if paths::atomic_write(config_path, &doc.to_string()) {
+    if paths::atomic_write_following_symlinks(config_path, &doc.to_string()) {
         Ok(())
     } else {
         Err("atomic_write failed".to_string())
@@ -2377,7 +2378,7 @@ pub fn setup_codex_execpolicy() -> bool {
     }
 
     let _ = std::fs::create_dir_all(&rules_dir);
-    paths::atomic_write(&rules_file, &rule_content)
+    paths::atomic_write_following_symlinks(&rules_file, &rule_content)
 }
 
 /// Remove hcom execpolicy rule.
@@ -2508,7 +2509,7 @@ pub fn try_setup_codex_hooks(include_permissions: bool) -> Result<(), SetupError
     }
     let content =
         serde_json::to_string_pretty(&hooks_json).map_err(SetupError::SerializationFailed)?;
-    paths::atomic_write_io(&hooks_path, &content).map_err(|source| {
+    paths::atomic_write_following_symlinks_io(&hooks_path, &content).map_err(|source| {
         SetupError::AtomicWriteFailed {
             path: hooks_path.clone(),
             source,
@@ -2619,7 +2620,7 @@ fn remove_codex_hooks_from_dir(base: &std::path::Path) -> bool {
                 } else {
                     let content =
                         serde_json::to_string_pretty(&json).unwrap_or_else(|_| "{}".into());
-                    ok &= paths::atomic_write(&hooks_path, &content);
+                    ok &= paths::atomic_write_following_symlinks(&hooks_path, &content);
                 }
             }
             Err(_) => ok = false,

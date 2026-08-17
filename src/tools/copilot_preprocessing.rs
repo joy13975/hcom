@@ -119,7 +119,7 @@ pub(crate) fn ensure_copilot_workspace_trusted(workspace: &Path) -> anyhow::Resu
         normalized.display(),
         path.display()
     );
-    crate::paths::atomic_write_io(&path, &updated)?;
+    crate::paths::atomic_write_following_symlinks_io(&path, &updated)?;
     Ok(())
 }
 

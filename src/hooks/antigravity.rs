@@ -229,7 +229,7 @@ pub fn try_setup_antigravity_hooks(include_permissions: bool) -> Result<(), Setu
     let json_str = serde_json::to_string_pretty(&Value::Object(hooks_root))
         .map_err(SetupError::SerializationFailed)?;
 
-    crate::paths::atomic_write_io(&hooks_path, &json_str).map_err(|e| {
+    crate::paths::atomic_write_following_symlinks_io(&hooks_path, &json_str).map_err(|e| {
         SetupError::AtomicWriteFailed {
             path: hooks_path.clone(),
             source: e,
@@ -300,7 +300,7 @@ fn remove_hooks_lifecycle_block_at(path: &Path) -> bool {
         Ok(s) => s,
         Err(_) => return false,
     };
-    crate::paths::atomic_write_io(path, &json_str).is_ok()
+    crate::paths::atomic_write_following_symlinks_io(path, &json_str).is_ok()
 }
 
 fn verify_hooks_at(path: &Path, check_permissions: bool) -> Result<(), VerifyFailReason> {
@@ -728,7 +728,7 @@ fn setup_antigravity_permissions() -> bool {
         Ok(s) => s,
         Err(_) => return false,
     };
-    crate::paths::atomic_write(&path, &json_str)
+    crate::paths::atomic_write_following_symlinks(&path, &json_str)
 }
 
 /// Remove hcom rules from agy settings.json. Cleans `permissions.allow` and
@@ -784,7 +784,7 @@ fn remove_antigravity_permissions_at(path: &Path) -> bool {
         Ok(s) => s,
         Err(_) => return false,
     };
-    crate::paths::atomic_write(path, &json_str)
+    crate::paths::atomic_write_following_symlinks(path, &json_str)
 }
 
 /// Check that every hcom rule we install is present in agy settings.json.
