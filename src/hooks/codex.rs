@@ -1553,7 +1553,8 @@ fn write_hcom_hook_trust_state(
     if let Some(parent) = config_path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
-    paths::atomic_write_following_symlinks_io(config_path, &doc.to_string()).map_err(|e| e.to_string())
+    paths::atomic_write_following_symlinks_io(config_path, &doc.to_string())
+        .map_err(|e| e.to_string())
 }
 
 /// Rewrite hcom's own `hooks.state` entries from an authoritative hooks/list
