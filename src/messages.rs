@@ -123,31 +123,50 @@ impl InstanceInfo {
 // validate_scope and validate_intent live in core::helpers — re-export for consumers.
 pub use crate::core::helpers::{validate_intent, validate_scope};
 
+/// Validate agent-authored free text before it is stored as an event and later
+/// rendered raw onto peer terminals.
+///
+/// This is the single write-boundary guard for the "unvalidated free text into
+/// events" class: it rejects C0/C1 control characters (including ESC 0x1B, which
+/// enables terminal-escape injection) and caps size at [`MAX_MESSAGE_SIZE`], so
+/// every downstream sink — inline roster, `-v`, `list <name>`, TUI, relay
+/// replication — is safe by construction regardless of how it prints the text.
+///
+/// `allow_line_whitespace` distinguishes multi-line fields (message bodies) from
+/// single-line fields (`doing`, rendered on one roster row): when `false`, tab,
+/// newline and carriage return are rejected too, so the value cannot break out
+/// of its display line.
+///
+/// Empty input is accepted here; callers that require content (e.g. `send`)
+/// enforce that separately, while callers that treat empty as a clear (`doing`)
+/// rely on it being allowed.
+pub fn validate_text_field(text: &str, allow_line_whitespace: bool) -> Result<(), String> {
+    for ch in text.chars() {
+        if ch == '\t' || ch == '\n' || ch == '\r' {
+            if allow_line_whitespace {
+                continue;
+            }
+            return Err("Text must be a single line (no tabs or newlines)".to_string());
+        }
+        if ('\x00'..='\x1F').contains(&ch) || ('\u{0080}'..='\u{009F}').contains(&ch) {
+            return Err("Text contains control characters".to_string());
+        }
+    }
+
+    if text.len() > MAX_MESSAGE_SIZE {
+        return Err(format!("Text too large (max {} chars)", MAX_MESSAGE_SIZE));
+    }
+
+    Ok(())
+}
+
 /// Validate message content and size.
 pub fn validate_message(message: &str) -> Result<(), String> {
     if message.is_empty() || message.trim().is_empty() {
         return Err("Message required".to_string());
     }
 
-    // Reject control characters (except \n, \r, \t)
-    for ch in message.chars() {
-        if ('\x00'..='\x08').contains(&ch)
-            || ('\x0B'..='\x0C').contains(&ch)
-            || ('\x0E'..='\x1F').contains(&ch)
-            || ('\u{0080}'..='\u{009F}').contains(&ch)
-        {
-            return Err("Message contains control characters".to_string());
-        }
-    }
-
-    if message.len() > MAX_MESSAGE_SIZE {
-        return Err(format!(
-            "Message too large (max {} chars)",
-            MAX_MESSAGE_SIZE
-        ));
-    }
-
-    Ok(())
+    validate_text_field(message, true)
 }
 
 /// Format recipients list for display.
@@ -951,6 +970,36 @@ mod tests {
     fn test_validate_message_too_large() {
         let big = "x".repeat(MAX_MESSAGE_SIZE + 1);
         assert!(validate_message(&big).is_err());
+    }
+
+    // ---- validate_text_field ----
+
+    #[test]
+    fn test_validate_text_field_rejects_esc_and_c1() {
+        // ESC (0x1B) is the terminal-escape-injection vector; rejected in both modes.
+        assert!(validate_text_field("a\x1b[2Jb", true).is_err());
+        assert!(validate_text_field("a\x1b[2Jb", false).is_err());
+        // C1 control range is rejected too.
+        assert!(validate_text_field("a\u{0085}b", true).is_err());
+    }
+
+    #[test]
+    fn test_validate_text_field_single_line_rejects_line_whitespace() {
+        // Single-line fields (doing) reject tabs/newlines/CR that would break the row...
+        assert!(validate_text_field("line1\nline2", false).is_err());
+        assert!(validate_text_field("a\tb", false).is_err());
+        assert!(validate_text_field("a\rb", false).is_err());
+        // ...while multi-line fields (message bodies) accept them.
+        assert!(validate_text_field("line1\nline2\ttab", true).is_ok());
+    }
+
+    #[test]
+    fn test_validate_text_field_allows_empty_and_caps_size() {
+        // Empty is allowed (the `doing` clear); size is capped in both modes.
+        assert!(validate_text_field("", false).is_ok());
+        let big = "x".repeat(MAX_MESSAGE_SIZE + 1);
+        assert!(validate_text_field(&big, false).is_err());
+        assert!(validate_text_field(&big, true).is_err());
     }
 
     // ---- format_recipients ----

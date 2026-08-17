@@ -1236,3 +1236,29 @@ fn doing_rejects_an_unregistered_agent() {
     let (code, stdout, stderr) = h.run(["doing", "--name", "ghost", "something"]);
     assert_ne!(code, 0, "expected failure; stdout={stdout} stderr={stderr}");
 }
+
+#[test]
+fn doing_rejects_terminal_escape_and_newline_injection() {
+    let h = Hcom::new();
+    let me = h.start();
+
+    // Terminal-escape injection: an ESC (0x1B) sequence would clear/recolor a
+    // peer's screen and fake a roster row when rendered raw via println!. It
+    // must be rejected at the write boundary and never stored.
+    let (code, _stdout, stderr) =
+        h.run(["doing", "--name", &me, "\x1b[2J\x1b[31mSYSTEM ALERT"]);
+    assert_ne!(code, 0, "escape sequence must be rejected; stderr={stderr}");
+
+    // Newline injection: `doing` renders on one roster line, so a value that
+    // spans lines (fabricating extra rows) must also be rejected.
+    let (code, _stdout, stderr) =
+        h.run(["doing", "--name", &me, "active - now\n  o admin - active"]);
+    assert_ne!(code, 0, "newline must be rejected; stderr={stderr}");
+
+    // Neither rejected write leaked into the roster: `doing` is still unset.
+    let (_, stdout, _) = h.run(["doing", "--name", &me]);
+    assert!(
+        stdout.contains("nothing set"),
+        "rejected writes must not be stored; stdout={stdout}"
+    );
+}

@@ -75,6 +75,15 @@ pub fn cmd_doing(db: &HcomDb, args: &DoingArgs, ctx: Option<&CommandContext>) ->
 
     let text = args.text.join(" ");
     let text = text.trim();
+    // Write-boundary guard: `doing` is agent-authored free text rendered raw on
+    // peer terminals (inline roster, `-v`, `list <name>`, TUI) and replicated
+    // relay-wide, so it must satisfy the same control-char / size invariant as
+    // `hcom send`. It renders on a single roster line, so tabs/newlines are
+    // rejected too. Empty stays allowed as the intended clear.
+    if let Err(e) = crate::messages::validate_text_field(text, false) {
+        eprintln!("Error: {e}");
+        return 1;
+    }
     if let Err(e) = db.log_doing_event(&name, text) {
         eprintln!("Error: could not record activity: {e}");
         return 1;
