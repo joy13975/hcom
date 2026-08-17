@@ -1124,7 +1124,7 @@ fn setup_gemini_policy() -> bool {
     }
 
     let _ = std::fs::create_dir_all(&policies_dir);
-    crate::paths::atomic_write(&policy_file, &policy_content)
+    crate::paths::atomic_write_following_symlinks(&policy_file, &policy_content)
 }
 
 /// Remove hcom policy file.
@@ -1311,7 +1311,7 @@ pub fn ensure_hooks_enabled() -> bool {
     set_hooks_enabled(&mut settings);
 
     let json_str = serde_json::to_string_pretty(&Value::Object(settings)).unwrap_or_default();
-    crate::paths::atomic_write(&settings_path, &json_str)
+    crate::paths::atomic_write_following_symlinks(&settings_path, &json_str)
 }
 
 #[derive(Debug, Clone, thiserror::Error)]
@@ -1497,7 +1497,7 @@ pub fn try_setup_gemini_hooks(include_permissions: bool) -> Result<(), SetupErro
     let json_str = serde_json::to_string_pretty(&Value::Object(settings))
         .map_err(SetupError::SerializationFailed)?;
 
-    crate::paths::atomic_write_io(&settings_path, &json_str).map_err(|e| {
+    crate::paths::atomic_write_following_symlinks_io(&settings_path, &json_str).map_err(|e| {
         SetupError::AtomicWriteFailed {
             path: settings_path.clone(),
             source: e,
@@ -1705,7 +1705,7 @@ fn remove_hooks_from_path(path: &Path) -> bool {
     remove_hcom_hooks_from_settings(&mut settings);
 
     let json_str = serde_json::to_string_pretty(&Value::Object(settings)).unwrap_or_default();
-    crate::paths::atomic_write(path, &json_str)
+    crate::paths::atomic_write_following_symlinks(path, &json_str)
 }
 
 #[cfg(test)]

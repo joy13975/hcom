@@ -128,7 +128,7 @@ fn write_toml(path: &Path, doc: &DocumentMut) -> Result<(), SetupError> {
         })?;
     }
     let content = doc.to_string();
-    paths::atomic_write_io(path, &content).map_err(|source| SetupError::AtomicWriteFailed {
+    paths::atomic_write_following_symlinks_io(path, &content).map_err(|source| SetupError::AtomicWriteFailed {
         path: path.to_path_buf(),
         source,
     })

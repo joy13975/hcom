@@ -289,13 +289,22 @@ const MAX_WRITE_SYMLINK_HOPS: usize = 8;
 
 /// Resolve the path an atomic write should actually land on, following symlinks.
 ///
-/// `atomic_write_io` replaces its target by rename, and a rename onto a symlink
+/// An atomic write replaces its target by rename, and a rename onto a symlink
 /// REPLACES THE LINK with a regular file. That silently detaches config files
 /// which users symlink into a dotfiles repo (`~/.claude/settings.json` ->
 /// `~/dotfiles/claude/settings.json`): the edit lands in a new local file, the
 /// repo copy stops receiving updates, and the two diverge with no error and no
 /// warning. Following the link first means the write updates the file the user
 /// actually pointed at, and the link survives.
+///
+/// Following a symlink is OPT-IN, exposed only through
+/// `atomic_write_following_symlinks[_io]`. The default primitive
+/// (`atomic_write[_io]`) never follows, so internal state files (flag counters,
+/// pidfiles, device-id, update flags under `~/.hcom/`) keep the pre-existing
+/// redirection immunity: a pre-planted link at their path is destroyed by the
+/// rename rather than written through to whatever it targets. Symlink following
+/// only makes sense for files the USER maintains and may link into a dotfiles
+/// repo (tool configs); it is never applied to hcom's own internal state.
 ///
 /// A dangling link resolves to its missing target on purpose: that is the
 /// "linked into a checkout that has not created the file yet" case, where
@@ -330,14 +339,28 @@ fn resolve_write_target(filepath: &Path) -> std::io::Result<PathBuf> {
     ))
 }
 
-/// Write content to file atomically (temp file + rename).
+/// Write content to file atomically (temp file + rename), WITHOUT following
+/// symlinks: the rename lands on `filepath` literally, so a pre-planted symlink
+/// at that path is destroyed rather than written through. This is the safe
+/// default for internal state files; callers that must preserve a user's
+/// dotfiles symlink use `atomic_write_following_symlinks_io` instead.
+///
 /// Returns the underlying IO error on failure for callers that need error detail.
 pub fn atomic_write_io(filepath: &Path, content: &str) -> std::io::Result<()> {
-    // Follow symlinks before writing: renaming onto a link would destroy it and
-    // detach a user's symlinked config (see resolve_write_target).
-    let resolved = resolve_write_target(filepath)?;
-    let filepath = resolved.as_path();
+    write_atomically(filepath, content)
+}
 
+/// Like `atomic_write_io`, but follows a symlink at the final path component so
+/// the write lands on the file the user pointed at and the link survives (see
+/// `resolve_write_target`). For user-maintained config files that may be linked
+/// into a dotfiles repo — never for hcom's internal state.
+pub fn atomic_write_following_symlinks_io(filepath: &Path, content: &str) -> std::io::Result<()> {
+    let resolved = resolve_write_target(filepath)?;
+    write_atomically(resolved.as_path(), content)
+}
+
+/// Core atomic write: temp file + fsync + rename onto `filepath` as given.
+fn write_atomically(filepath: &Path, content: &str) -> std::io::Result<()> {
     // Ensure parent directory exists
     if let Some(parent) = filepath.parent() {
         fs::create_dir_all(parent)?;
@@ -383,10 +406,17 @@ fn persist_temp_file(mut tmp: tempfile::NamedTempFile, filepath: &Path) -> std::
     unreachable!("persist loop returns on success or final error")
 }
 
-/// Write content to file atomically (temp file + rename).
-/// Returns true on success, false on failure.
+/// Write content to file atomically (temp file + rename), WITHOUT following
+/// symlinks. Returns true on success, false on failure.
 pub fn atomic_write(filepath: &Path, content: &str) -> bool {
     atomic_write_io(filepath, content).is_ok()
+}
+
+/// Like `atomic_write`, but follows a symlink at the target so a user's
+/// dotfiles link survives (see `atomic_write_following_symlinks_io`).
+/// Returns true on success, false on failure.
+pub fn atomic_write_following_symlinks(filepath: &Path, content: &str) -> bool {
+    atomic_write_following_symlinks_io(filepath, content).is_ok()
 }
 
 /// Increment a counter in .tmp/flags/{name} and return new value.
@@ -455,11 +485,45 @@ mod tests {
         assert!(!fs::symlink_metadata(&target).unwrap().is_symlink());
     }
 
-    /// Regression: a rename onto a symlink used to replace the link with a
-    /// regular file, detaching config that users link into a dotfiles repo.
+    /// Redirection immunity: the DEFAULT primitive must NOT follow symlinks, so
+    /// a pre-planted link at an internal state path (e.g. a flag counter under
+    /// `~/.hcom/.tmp/flags/`) is destroyed by the rename rather than written
+    /// through to whatever it targets. Without this the shared primitive would
+    /// give every internal caller a redirection surface (settings.json et al.).
     #[cfg(unix)]
     #[test]
-    fn test_atomic_write_io_writes_through_symlink_and_keeps_link() {
+    fn test_atomic_write_io_does_not_follow_symlink() {
+        let tmp = TempDir::new().unwrap();
+        let sensitive = tmp.path().join("sensitive.json");
+        let planted = tmp.path().join("flag");
+        fs::write(&sensitive, "do-not-touch").unwrap();
+        // Attacker plants the internal-state path as a link to a sensitive file.
+        std::os::unix::fs::symlink(&sensitive, &planted).unwrap();
+
+        atomic_write_io(&planted, "1").unwrap();
+
+        assert!(
+            !fs::symlink_metadata(&planted).unwrap().is_symlink(),
+            "no-follow write must replace the planted link with a real file"
+        );
+        assert_eq!(
+            fs::read_to_string(&planted).unwrap(),
+            "1",
+            "the write must land at the literal path"
+        );
+        assert_eq!(
+            fs::read_to_string(&sensitive).unwrap(),
+            "do-not-touch",
+            "the symlink target must NOT be written through"
+        );
+    }
+
+    /// Regression: a rename onto a symlink used to replace the link with a
+    /// regular file, detaching config that users link into a dotfiles repo. The
+    /// opt-in following variant preserves the link and writes through it.
+    #[cfg(unix)]
+    #[test]
+    fn test_atomic_write_following_symlinks_writes_through_and_keeps_link() {
         let tmp = TempDir::new().unwrap();
         let repo = tmp.path().join("repo");
         let live = tmp.path().join("live");
@@ -470,7 +534,7 @@ mod tests {
         fs::write(&real, "from-repo").unwrap();
         std::os::unix::fs::symlink(&real, &link).unwrap();
 
-        atomic_write_io(&link, "written-by-hcom").unwrap();
+        atomic_write_following_symlinks_io(&link, "written-by-hcom").unwrap();
 
         assert!(
             fs::symlink_metadata(&link).unwrap().is_symlink(),
@@ -485,7 +549,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn test_atomic_write_io_follows_relative_symlink() {
+    fn test_atomic_write_following_symlinks_follows_relative_symlink() {
         let tmp = TempDir::new().unwrap();
         let real = tmp.path().join("target.json");
         let link = tmp.path().join("link.json");
@@ -493,7 +557,7 @@ mod tests {
         // Relative destinations resolve against the link's own directory.
         std::os::unix::fs::symlink("target.json", &link).unwrap();
 
-        atomic_write_io(&link, "after").unwrap();
+        atomic_write_following_symlinks_io(&link, "after").unwrap();
 
         assert!(fs::symlink_metadata(&link).unwrap().is_symlink());
         assert_eq!(fs::read_to_string(&real).unwrap(), "after");
@@ -503,13 +567,13 @@ mod tests {
     /// target, not clobber the link.
     #[cfg(unix)]
     #[test]
-    fn test_atomic_write_io_creates_dangling_symlink_target() {
+    fn test_atomic_write_following_symlinks_creates_dangling_target() {
         let tmp = TempDir::new().unwrap();
         let missing = tmp.path().join("not-yet").join("settings.json");
         let link = tmp.path().join("settings.json");
         std::os::unix::fs::symlink(&missing, &link).unwrap();
 
-        atomic_write_io(&link, "created").unwrap();
+        atomic_write_following_symlinks_io(&link, "created").unwrap();
 
         assert!(fs::symlink_metadata(&link).unwrap().is_symlink());
         assert_eq!(fs::read_to_string(&missing).unwrap(), "created");
@@ -517,7 +581,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn test_atomic_write_io_rejects_symlink_cycle() {
+    fn test_atomic_write_following_symlinks_rejects_cycle() {
         let tmp = TempDir::new().unwrap();
         let first = tmp.path().join("a");
         let second = tmp.path().join("b");
@@ -525,7 +589,7 @@ mod tests {
         std::os::unix::fs::symlink(&first, &second).unwrap();
 
         // Fails loudly rather than spinning or silently clobbering a link.
-        let err = atomic_write_io(&first, "content").unwrap_err();
+        let err = atomic_write_following_symlinks_io(&first, "content").unwrap_err();
         assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
         assert!(err.to_string().contains("symlink chain"));
     }

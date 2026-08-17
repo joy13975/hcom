@@ -3266,7 +3266,7 @@ pub fn try_setup_claude_hooks(include_permissions: bool) -> Result<(), SetupErro
     let json_str =
         serde_json::to_string_pretty(&settings).map_err(SetupError::SerializationFailed)?;
 
-    paths::atomic_write_io(&settings_path, &json_str).map_err(|e| {
+    paths::atomic_write_following_symlinks_io(&settings_path, &json_str).map_err(|e| {
         SetupError::AtomicWriteFailed {
             path: settings_path.clone(),
             source: e,
@@ -3414,7 +3414,7 @@ fn remove_hooks_from_settings_path(settings_path: &Path) -> bool {
         Err(_) => return false,
     };
 
-    paths::atomic_write(settings_path, &json_str)
+    paths::atomic_write_following_symlinks(settings_path, &json_str)
 }
 
 /// Remove hcom hooks from Claude settings.

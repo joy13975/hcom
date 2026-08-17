@@ -132,7 +132,7 @@ pub(crate) fn ensure_cursor_workspace_trusted(workspace: &Path) -> anyhow::Resul
         "workspacePath": normalized.to_string_lossy(),
         "trustMethod": "hcom-launch",
     }))?;
-    crate::paths::atomic_write_io(&marker, &content)?;
+    crate::paths::atomic_write_following_symlinks_io(&marker, &content)?;
     Ok(())
 }
 
