@@ -52,7 +52,6 @@ pub struct ListArgs {
     pub last: Option<usize>,
 }
 
-/// Get unread message count for a single instance.
 /// Truncate display text at a char boundary, appending an ellipsis when cut.
 fn truncate_display(text: &str, max: usize) -> String {
     if text.len() <= max {
@@ -65,6 +64,7 @@ fn truncate_display(text: &str, max: usize) -> String {
     format!("{}...", &text[..end])
 }
 
+/// Get unread message count for a single instance.
 fn get_unread_count(db: &HcomDb, name: &str, last_event_id: i64) -> i64 {
     db.conn()
         .query_row(

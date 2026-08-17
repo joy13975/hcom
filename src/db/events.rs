@@ -21,12 +21,19 @@ pub fn doing_map_from_conn(
            ON e.id = m.id",
     ) {
         Ok(stmt) => stmt,
-        Err(_) => return std::collections::HashMap::new(),
+        Err(e) => {
+            crate::log::log_error("db", "doing_map_from_conn.prepare", &format!("{e}"));
+            return std::collections::HashMap::new();
+        }
     };
-    let Ok(rows) = stmt.query_map(params![DOING_EVENT_TYPE], |row| {
+    let rows = match stmt.query_map(params![DOING_EVENT_TYPE], |row| {
         Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-    }) else {
-        return std::collections::HashMap::new();
+    }) {
+        Ok(rows) => rows,
+        Err(e) => {
+            crate::log::log_error("db", "doing_map_from_conn.query", &format!("{e}"));
+            return std::collections::HashMap::new();
+        }
     };
     rows.filter_map(|row| row.ok())
         .filter_map(|(instance, data)| doing_text_from_data(&data).map(|text| (instance, text)))

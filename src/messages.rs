@@ -127,10 +127,14 @@ pub use crate::core::helpers::{validate_intent, validate_scope};
 /// rendered raw onto peer terminals.
 ///
 /// This is the single write-boundary guard for the "unvalidated free text into
-/// events" class: it rejects C0/C1 control characters (including ESC 0x1B, which
-/// enables terminal-escape injection) and caps size at [`MAX_MESSAGE_SIZE`], so
-/// every downstream sink — inline roster, `-v`, `list <name>`, TUI, relay
-/// replication — is safe by construction regardless of how it prints the text.
+/// events" class: it rejects the Cc control characters — C0 (0x00-0x1F, including
+/// ESC 0x1B, which enables terminal-escape injection), DEL (0x7F), and C1
+/// (U+0080-U+009F) — plus the bidirectional formatting controls (U+202A-202E,
+/// U+2066-2069) that enable Trojan-Source-style visual reordering, and caps size
+/// at [`MAX_MESSAGE_SIZE`], so every downstream sink — inline roster, `-v`,
+/// `list <name>`, TUI, relay replication — is safe by construction regardless of
+/// how it prints the text. Other `Cf` format chars (e.g. ZWJ U+200D used in
+/// legitimate emoji sequences) are deliberately left allowed.
 ///
 /// `allow_line_whitespace` distinguishes multi-line fields (message bodies) from
 /// single-line fields (`doing`, rendered on one roster row): when `false`, tab,
@@ -148,13 +152,21 @@ pub fn validate_text_field(text: &str, allow_line_whitespace: bool) -> Result<()
             }
             return Err("Text must be a single line (no tabs or newlines)".to_string());
         }
-        if ('\x00'..='\x1F').contains(&ch) || ('\u{0080}'..='\u{009F}').contains(&ch) {
+        if ('\x00'..='\x1F').contains(&ch)
+            || ch == '\x7f'
+            || ('\u{0080}'..='\u{009F}').contains(&ch)
+        {
             return Err("Text contains control characters".to_string());
+        }
+        // Bidirectional overrides/embeddings/isolates let a single line render
+        // visually reordered on peer terminals (Trojan-Source-style spoofing).
+        if ('\u{202A}'..='\u{202E}').contains(&ch) || ('\u{2066}'..='\u{2069}').contains(&ch) {
+            return Err("Text contains bidirectional control characters".to_string());
         }
     }
 
     if text.len() > MAX_MESSAGE_SIZE {
-        return Err(format!("Text too large (max {} chars)", MAX_MESSAGE_SIZE));
+        return Err(format!("Text too large (max {} bytes)", MAX_MESSAGE_SIZE));
     }
 
     Ok(())
@@ -981,6 +993,26 @@ mod tests {
         assert!(validate_text_field("a\x1b[2Jb", false).is_err());
         // C1 control range is rejected too.
         assert!(validate_text_field("a\u{0085}b", true).is_err());
+    }
+
+    #[test]
+    fn test_validate_text_field_rejects_del_and_bidi_controls() {
+        // DEL (0x7F) is a Cc control the guard's contract covers; rejected in both modes.
+        assert!(validate_text_field("a\x7fb", true).is_err());
+        assert!(validate_text_field("a\x7fb", false).is_err());
+        // Bidi override/embedding/isolate controls enable Trojan-Source visual
+        // reordering on a single roster line; rejected in both modes.
+        for c in ['\u{202A}', '\u{202B}', '\u{202C}', '\u{202D}', '\u{202E}'] {
+            assert!(validate_text_field(&format!("a{c}b"), false).is_err());
+            assert!(validate_text_field(&format!("a{c}b"), true).is_err());
+        }
+        for c in ['\u{2066}', '\u{2067}', '\u{2068}', '\u{2069}'] {
+            assert!(validate_text_field(&format!("a{c}b"), false).is_err());
+            assert!(validate_text_field(&format!("a{c}b"), true).is_err());
+        }
+        // Other Cf format chars stay allowed: ZWJ in a legitimate emoji sequence.
+        assert!(validate_text_field("\u{1F469}\u{200D}\u{1F4BB}", false).is_ok());
+        assert!(validate_text_field("\u{1F469}\u{200D}\u{1F4BB}", true).is_ok());
     }
 
     #[test]

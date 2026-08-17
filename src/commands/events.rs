@@ -1409,8 +1409,16 @@ mod tests {
     #[test]
     fn test_events_args_accept_doing_type() {
         use clap::Parser;
-        let args = EventsArgs::try_parse_from(["events", "--type", "doing"]).unwrap();
-        assert_eq!(args.filters.event_type, vec!["doing"]);
+        // Parse the SSOT const's value, then assert the parsed filter equals the
+        // const — so a rename of DOING_EVENT_TYPE that is not mirrored at the
+        // filter gate fails to compile/parse here rather than silently dropping
+        // `--type doing` results.
+        let args = EventsArgs::try_parse_from(["events", "--type", crate::db::DOING_EVENT_TYPE])
+            .unwrap();
+        assert_eq!(
+            args.filters.event_type,
+            vec![crate::db::DOING_EVENT_TYPE.to_string()]
+        );
     }
 
     #[test]

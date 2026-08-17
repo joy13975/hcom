@@ -465,6 +465,14 @@ fn start_rebind(
         Some(&cwd_override),
     );
 
+    // A reclaim recreates the identity fresh (new instances row, cursor treated
+    // as a delivery boundary above), so the prior occupant's self-reported
+    // `doing` must not carry over — doing derivation is latest-event-wins per
+    // name with no lifetime scoping, so append an empty doing to reset it blank.
+    if let Err(e) = db.log_doing_event(&target_name, "") {
+        eprintln!("[hcom] warn: reset doing failed for {target_name}: {e}");
+    }
+
     if let Some(ref sid) = session_id {
         let old_root = if current_name.is_empty() {
             target_name.as_str()
@@ -1174,6 +1182,39 @@ mod tests {
             db.get_session_binding("sess-rebind").unwrap().as_deref(),
             Some("nova"),
             "a start after the rebind returns the reclaimed identity"
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn test_rebind_reclaim_clears_prior_doing() {
+        let (_dir, hcom_dir, _home, _guard) = crate::hooks::test_helpers::isolated_test_env();
+        let db = HcomDb::open().unwrap();
+        assert!(crate::hooks::claude::setup_claude_hooks(false));
+
+        // The prior occupant of the name advertised what it was working on.
+        db.log_doing_event("nova", "refactoring auth").unwrap();
+        assert_eq!(db.get_doing("nova"), "refactoring auth");
+
+        // A different session reclaims the name via `start --as nova`.
+        let ctx = make_claude_ctx(
+            Some(("CLAUDE_CODE_SESSION_ID", "sess-reclaim")),
+            "/tmp/project",
+        );
+        assert_eq!(start_bare(&db, &hcom_dir, &ctx, None).unwrap(), 0);
+        assert_eq!(start_rebind(&db, "nova", &ctx, None).unwrap(), 0);
+
+        // The reclaimed identity must start blank, not inherit stale doing text
+        // this session never wrote.
+        assert_eq!(
+            db.get_doing("nova"),
+            "",
+            "a reclaimed name must not inherit the prior occupant's doing text"
+        );
+        assert_eq!(
+            db.get_doing_map().get("nova").map(String::as_str),
+            Some(""),
+            "the reclaimed name's doing resolves empty, which the roster renders as no activity"
         );
     }
 
