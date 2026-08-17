@@ -11,7 +11,10 @@ type HelpEntry = (&'static str, &'static str);
 
 const FILTER_HELP: &[HelpEntry] = &[
     ("  --agent NAME", "Agent name"),
-    ("  --type TYPE", "message | status | life"),
+    (
+        "  --type TYPE",
+        "message | status | life | epic | doing | headsup",
+    ),
     ("  --status VAL", "listening | active | blocked"),
     (
         "  --context PATTERN",
@@ -116,8 +119,12 @@ const EVENTS_HELP_2: &[HelpEntry] = &[
     ),
     ("  status_*", "val, context, detail"),
     ("  life_*", "action, by, batch_id, reason"),
+    (
+        "  self-reports",
+        "epic/doing/headsup carry their text in json_extract(data, '$.text')",
+    ),
     ("", ""),
-    ("  type", "message, status, life"),
+    ("  type", "message, status, life, epic, doing, headsup"),
     ("  msg_scope", "broadcast, mentions"),
     ("  msg_sender_kind", "instance, external, system"),
     (
@@ -151,7 +158,7 @@ const LIST_HELP: &[HelpEntry] = &[
     ),
     (
         "",
-        "  status_age_seconds, description, doing, unread_count, tool, tag, directory,",
+        "  status_age_seconds, description, epic, doing, headsup, unread_count, tool, tag, directory,",
     ),
     (
         "",
@@ -366,13 +373,109 @@ const BUNDLE_HELP: &[HelpEntry] = &[
     ("  --json", "Output JSON"),
 ];
 
+const FORUM_HELP: &[HelpEntry] = &[
+    (
+        "forum",
+        "What every agent is working on, warning about, claimed",
+    ),
+    ("  --json", "Output JSON"),
+    ("", ""),
+    (
+        "",
+        "Read it before starting work and whenever hcom notifies you.",
+    ),
+    (
+        "",
+        "Each agent's doing shows its AGE, so a stale report is visible",
+    ),
+    ("", "as stale instead of reading as current."),
+    ("", ""),
+    (
+        "",
+        "Post your own with: hcom epic / doing / heads-up / claim",
+    ),
+    ("", ""),
+];
+
+const EPIC_HELP: &[HelpEntry] = &[
+    ("epic \"<text>\"", "Set your high-level line of work"),
+    ("epic", "Show it"),
+    ("epic \"\"", "Clear it"),
+    ("", ""),
+    ("", "One line, set once when you start a piece of work. The"),
+    ("", "current focus within it belongs in hcom doing."),
+    ("", ""),
+];
+
 const DOING_HELP: &[HelpEntry] = &[
-    ("doing \"<text>\"", "Say what you are working on"),
+    ("doing \"<text>\"", "Say what you are working on right now"),
     ("doing", "Show what you last said you were working on"),
     ("doing \"\"", "Clear it"),
     ("", ""),
-    ("", "Other agents see it in hcom list and hcom list <name>."),
+    (
+        "",
+        "Refresh at least every 5-10 min and whenever you switch",
+    ),
+    (
+        "",
+        "focus: peers read it as current. hcom nudges you when it",
+    ),
+    ("", "goes stale (see config doing_max_age / doing_nudge)."),
+    ("", ""),
+    ("", "Other agents see it in hcom forum and hcom list."),
     ("", "Survives hook status updates, unlike status_detail."),
+    ("", ""),
+];
+
+const HEADSUP_HELP: &[HelpEntry] = &[
+    ("heads-up \"<text>\"", "Warn peers what to watch out for"),
+    ("heads-up", "Show it"),
+    ("heads-up \"\"", "Clear it"),
+    ("", ""),
+    (
+        "",
+        "For anything peers should anticipate so they do not thrash",
+    ),
+    (
+        "",
+        "the same systems: a service you are restarting, a shared",
+    ),
+    ("", "file you are rewriting, a migration mid-flight."),
+    ("", ""),
+    (
+        "",
+        "Flagged with ! on the hcom list roster line, shown in full",
+    ),
+    ("", "by hcom forum."),
+    ("", ""),
+];
+
+const CLAIM_HELP: &[HelpEntry] = &[
+    ("claim \"<glob>\"", "Reserve paths you are about to edit"),
+    (
+        "  --ttl 30m",
+        "How long it lasts (30m, 2h, 900s). Default 30m",
+    ),
+    ("claim", "Show the claims you hold"),
+    ("claim --list", "Show every live claim and who holds it"),
+    ("claim --release \"<glob>\"", "Release one"),
+    ("claim --release --all", "Release all of yours"),
+    ("", ""),
+    ("", "Advisory, not a lock: a peer about to write into your"),
+    ("", "claimed path is WARNED before the write, not blocked."),
+    ("", "Set config claim_block=1 to deny instead."),
+    ("", ""),
+    (
+        "",
+        "Claims expire and are released when you stop, so a crashed",
+    ),
+    ("", "agent can never wedge a peer."),
+    ("", ""),
+    (
+        "",
+        "A relative pattern matches at any depth, so \"src/auth/**\"",
+    ),
+    ("", "covers /repo/src/auth/token.rs."),
     ("", ""),
 ];
 
@@ -495,7 +598,22 @@ const CONFIG_HELP: &[HelpEntry] = &[
         "",
     ),
     ("  auto_approve", "Auto-approve safe hcom commands"),
-    ("  auto_subscribe", "Event auto-subscribe presets"),
+    (
+        "  auto_subscribe",
+        "Event auto-subscribe presets (collision, created, stopped, blocked, forum)",
+    ),
+    (
+        "  doing_max_age",
+        "Seconds before your 'doing' is nudged as stale (default 600)",
+    ),
+    (
+        "  doing_nudge",
+        "Emit the staleness nudge at all (default 1)",
+    ),
+    (
+        "  claim_block",
+        "Deny writes into another agent's claim instead of warning (default 0)",
+    ),
     (
         "  auto_trust_workspace",
         "Auto-trust launch dir (skip folder-trust prompt)",
@@ -925,7 +1043,11 @@ Commands:\n\
   send         Send message to your buddies\n\
   listen       Block until message or event arrives\n\
   list         Show agents, status, unread counts\n\
-  doing        Say what you are working on (others see it in list)\n\
+  forum        What every agent is working on, warning about, claimed\n\
+  epic         Set your high-level line of work\n\
+  doing        Say what you are working on right now\n\
+  heads-up     Warn peers what to watch out for\n\
+  claim        Reserve paths you are about to edit (advisory)\n\
   events       Query event stream, manage subscriptions\n\
   bundle       Structured context packages for handoffs\n\
   transcript   Read another agent's conversation\n\
@@ -1042,7 +1164,11 @@ pub fn get_command_help(name: &str) -> String {
 
     let entries: Option<&[HelpEntry]> = match name {
         "list" => Some(LIST_HELP),
+        "forum" => Some(FORUM_HELP),
+        "epic" => Some(EPIC_HELP),
         "doing" => Some(DOING_HELP),
+        "heads-up" => Some(HEADSUP_HELP),
+        "claim" => Some(CLAIM_HELP),
         "send" => Some(SEND_HELP),
         "bundle" => Some(BUNDLE_HELP),
         "stop" => Some(STOP_HELP),

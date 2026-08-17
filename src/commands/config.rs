@@ -197,38 +197,15 @@ const INSTANCE_KEYS: &[(&str, &str)] = &[
 // ── TOML Key Mapping ────────────────────
 
 /// Maps HCOM_ field name (lowercase, no prefix) to nested TOML dotted path.
+///
+/// Derived from `config::TOML_KEY_MAP` rather than hand-listed. This used to be a
+/// second copy of that table, and the two diverged silently: a field present in
+/// `TOML_KEY_MAP` but missing here fell through to the "unknown key" branch in
+/// `config_set_at_path`, which wrote a FLAT top-level key that the loader (reading
+/// the dotted path) then ignored — so `hcom config <key> <value>` reported success,
+/// read its own stray key back, and the setting never took effect.
 fn toml_path_for_key(field_name: &str) -> Option<&'static str> {
-    match field_name {
-        "terminal" => Some("terminal.active"),
-        "title_mode" => Some("terminal.title_mode"),
-        "tag" => Some("launch.tag"),
-        "hints" => Some("launch.hints"),
-        "notes" => Some("launch.notes"),
-        "subagent_timeout" => Some("launch.subagent_timeout"),
-        "auto_subscribe" => Some("launch.auto_subscribe"),
-        "auto_trust_workspace" => Some("launch.auto_trust_workspace"),
-        "claude_args" => Some("launch.claude.args"),
-        "gemini_args" => Some("launch.gemini.args"),
-        "gemini_system_prompt" => Some("launch.gemini.system_prompt"),
-        "codex_args" => Some("launch.codex.args"),
-        "codex_sandbox_mode" => Some("launch.codex.sandbox_mode"),
-        "codex_system_prompt" => Some("launch.codex.system_prompt"),
-        "opencode_args" => Some("launch.opencode.args"),
-        "kilo_args" => Some("launch.kilo.args"),
-        "pi_args" => Some("launch.pi.args"),
-        "omp_args" => Some("launch.omp.args"),
-        "cursor_args" => Some("launch.cursor.args"),
-        "kimi_args" => Some("launch.kimi.args"),
-        "copilot_args" => Some("launch.copilot.args"),
-        "relay" => Some("relay.url"),
-        "relay_id" => Some("relay.id"),
-        "relay_token" => Some("relay.token"),
-        "relay_enabled" => Some("relay.enabled"),
-        "timeout" => Some("preferences.timeout"),
-        "auto_approve" => Some("preferences.auto_approve"),
-        "name_export" => Some("preferences.name_export"),
-        _ => None,
-    }
+    crate::config::toml_path_for_field(field_name)
 }
 
 // ── Config File Operations ───────────────────────────────────────────────

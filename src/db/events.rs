@@ -5,43 +5,106 @@ use rusqlite::params;
 
 use super::{HcomDb, chrono_now_iso, subscriptions};
 
+/// Event type carrying the agent's high-level line of work (`hcom epic`).
+pub const EPIC_EVENT_TYPE: &str = "epic";
 /// Event type carrying an agent's self-reported current activity (`hcom doing`).
 pub const DOING_EVENT_TYPE: &str = "doing";
+/// Event type carrying what peers should watch out for (`hcom heads-up`).
+pub const HEADSUP_EVENT_TYPE: &str = "headsup";
 
-/// Latest self-reported activity for every instance that has set one.
+/// The three self-report kinds, in the order they are displayed.
 ///
-/// Takes a raw connection so `HcomDb::get_doing_map` and the TUI's snapshot
-/// loader (which only has a `Connection`) share one definition of this query.
-pub fn doing_map_from_conn(
+/// One list so the SQL filter, the `--type` CLI enum, the `forum` subscribe
+/// preset and the digest renderer cannot drift apart.
+pub const SELFREPORT_EVENT_TYPES: &[&str] =
+    &[EPIC_EVENT_TYPE, DOING_EVENT_TYPE, HEADSUP_EVENT_TYPE];
+
+/// What one agent currently advertises about itself.
+///
+/// `epic` is the high-level line of work, `doing` the current local focus, and
+/// `headsup` what peers should anticipate so they do not thrash the same
+/// systems. `doing_at` carries the `doing` event's timestamp because a stale
+/// activity line is worse than an absent one: every reader shows its age, and
+/// the staleness nudge is driven off it.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SelfReport {
+    pub epic: String,
+    pub doing: String,
+    pub headsup: String,
+    pub doing_at: Option<String>,
+}
+
+impl SelfReport {
+    /// True when the agent has advertised nothing at all.
+    pub fn is_empty(&self) -> bool {
+        self.epic.is_empty() && self.doing.is_empty() && self.headsup.is_empty()
+    }
+}
+
+/// Latest self-report for every instance that has set any of the three fields.
+///
+/// One grouped query for all kinds at once, so a roster of N agents costs one
+/// query rather than 3N. Takes a raw connection so the CLI and the TUI's
+/// snapshot loader (which only has a `Connection`) share one definition.
+pub fn selfreport_map_from_conn(
     conn: &rusqlite::Connection,
-) -> std::collections::HashMap<String, String> {
-    let mut stmt = match conn.prepare(
-        "SELECT e.instance, e.data FROM events e
-         JOIN (SELECT instance, MAX(id) AS id FROM events WHERE type = ? GROUP BY instance) m
-           ON e.id = m.id",
-    ) {
+) -> std::collections::HashMap<String, SelfReport> {
+    // Latest event per (instance, type) - the same latest-event-wins shape
+    // `hcom list --stopped` already uses for `life` events.
+    let placeholders = vec!["?"; SELFREPORT_EVENT_TYPES.len()].join(",");
+    let sql = format!(
+        "SELECT e.instance, e.type, e.data, e.timestamp FROM events e
+         JOIN (SELECT instance, type, MAX(id) AS id FROM events
+               WHERE type IN ({placeholders}) GROUP BY instance, type) m
+           ON e.id = m.id"
+    );
+    let mut stmt = match conn.prepare(&sql) {
         Ok(stmt) => stmt,
         Err(e) => {
-            crate::log::log_error("db", "doing_map_from_conn.prepare", &format!("{e}"));
+            crate::log::log_error("db", "selfreport_map_from_conn.prepare", &format!("{e}"));
             return std::collections::HashMap::new();
         }
     };
-    let rows = match stmt.query_map(params![DOING_EVENT_TYPE], |row| {
-        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+    let params = rusqlite::params_from_iter(SELFREPORT_EVENT_TYPES.iter());
+    let rows = match stmt.query_map(params, |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, String>(2)?,
+            row.get::<_, String>(3)?,
+        ))
     }) {
         Ok(rows) => rows,
         Err(e) => {
-            crate::log::log_error("db", "doing_map_from_conn.query", &format!("{e}"));
+            crate::log::log_error("db", "selfreport_map_from_conn.query", &format!("{e}"));
             return std::collections::HashMap::new();
         }
     };
-    rows.filter_map(|row| row.ok())
-        .filter_map(|(instance, data)| doing_text_from_data(&data).map(|text| (instance, text)))
-        .collect()
+
+    let mut map: std::collections::HashMap<String, SelfReport> = std::collections::HashMap::new();
+    for (instance, kind, data, timestamp) in rows.filter_map(|row| row.ok()) {
+        let Some(text) = selfreport_text_from_data(&data) else {
+            continue;
+        };
+        let entry = map.entry(instance).or_default();
+        match kind.as_str() {
+            EPIC_EVENT_TYPE => entry.epic = text,
+            DOING_EVENT_TYPE => {
+                entry.doing = text;
+                entry.doing_at = Some(timestamp);
+            }
+            HEADSUP_EVENT_TYPE => entry.headsup = text,
+            _ => {}
+        }
+    }
+    // An agent that set a field and then cleared it advertises nothing; drop it
+    // so readers do not have to special-case an all-empty entry.
+    map.retain(|_, report| !report.is_empty());
+    map
 }
 
-/// Pull the activity text out of a `doing` event's stored JSON payload.
-fn doing_text_from_data(data: &str) -> Option<String> {
+/// Pull the text out of a self-report event's stored JSON payload.
+fn selfreport_text_from_data(data: &str) -> Option<String> {
     serde_json::from_str::<serde_json::Value>(data)
         .ok()?
         .get("text")
@@ -497,6 +560,14 @@ impl HcomDb {
 
         self.log_event_with_ts("life", instance, &data, None)?;
 
+        // A stopped agent must not keep holding path reservations for the rest of
+        // their TTL - that is precisely how an advisory system would start
+        // behaving like a stuck lock. Done here rather than at each stop call site
+        // because this is the single funnel every stop path goes through.
+        if action == "stopped" {
+            self.release_all_claims(instance)?;
+        }
+
         Ok(())
     }
 
@@ -603,39 +674,57 @@ impl HcomDb {
         Ok(rows)
     }
 
-    /// Record what an instance says it is currently working on.
+    /// Record one of an instance's self-report fields (epic / doing / heads-up).
     ///
     /// Stored as an event rather than an `instances` column so it survives the
     /// hook lifecycle: `status_context`/`status_detail` are rewritten on every
     /// tool-use tick, which would erase agent-authored text. Being an event also
     /// makes it subscribable through the ordinary `events` filters.
-    pub fn log_doing_event(&self, instance: &str, text: &str) -> Result<i64> {
-        self.log_event(
-            DOING_EVENT_TYPE,
-            instance,
-            &serde_json::json!({ "text": text }),
-        )
+    pub fn log_selfreport_event(&self, kind: &str, instance: &str, text: &str) -> Result<i64> {
+        debug_assert!(
+            SELFREPORT_EVENT_TYPES.contains(&kind),
+            "unknown self-report kind {kind}"
+        );
+        self.log_event(kind, instance, &serde_json::json!({ "text": text }))
     }
 
-    /// What one instance last said it was working on. Empty when never set.
-    pub fn get_doing(&self, instance: &str) -> String {
+    /// One self-report field for one instance. Empty when never set or cleared.
+    pub fn get_selfreport_field(&self, kind: &str, instance: &str) -> String {
         self.conn
             .query_row(
                 "SELECT data FROM events WHERE type = ? AND instance = ? ORDER BY id DESC LIMIT 1",
-                params![DOING_EVENT_TYPE, instance],
+                params![kind, instance],
                 |row| row.get::<_, String>(0),
             )
             .ok()
-            .and_then(|data| doing_text_from_data(&data))
+            .and_then(|data| selfreport_text_from_data(&data))
             .unwrap_or_default()
     }
 
-    /// Latest self-reported activity for every instance that has set one.
+    /// Everything one instance advertises about itself.
+    pub fn get_selfreport(&self, instance: &str) -> SelfReport {
+        SelfReport {
+            epic: self.get_selfreport_field(EPIC_EVENT_TYPE, instance),
+            doing: self.get_selfreport_field(DOING_EVENT_TYPE, instance),
+            headsup: self.get_selfreport_field(HEADSUP_EVENT_TYPE, instance),
+            doing_at: self
+                .conn
+                .query_row(
+                    "SELECT timestamp FROM events WHERE type = ? AND instance = ?
+                     ORDER BY id DESC LIMIT 1",
+                    params![DOING_EVENT_TYPE, instance],
+                    |row| row.get::<_, String>(0),
+                )
+                .ok(),
+        }
+    }
+
+    /// Latest self-report for every instance that has advertised anything.
     ///
     /// One query for the whole listing rather than a per-instance lookup, so
     /// `hcom list` does not issue N queries for N agents.
-    pub fn get_doing_map(&self) -> std::collections::HashMap<String, String> {
-        doing_map_from_conn(&self.conn)
+    pub fn get_selfreport_map(&self) -> std::collections::HashMap<String, SelfReport> {
+        selfreport_map_from_conn(&self.conn)
     }
 
     /// Get current maximum event ID, or 0 if no events.
@@ -682,47 +771,102 @@ impl HcomDb {
 mod tests {
     use super::super::tests::{cleanup_test_db, setup_full_test_db};
 
+    use super::{DOING_EVENT_TYPE, EPIC_EVENT_TYPE, HEADSUP_EVENT_TYPE};
+
     #[test]
-    fn test_doing_round_trip() {
+    fn test_selfreport_round_trip_for_every_kind() {
         let (db, db_path) = setup_full_test_db();
 
-        assert_eq!(db.get_doing("luna"), "");
-        db.log_doing_event("luna", "refactoring the auth layer")
-            .unwrap();
-        assert_eq!(db.get_doing("luna"), "refactoring the auth layer");
+        for kind in [EPIC_EVENT_TYPE, DOING_EVENT_TYPE, HEADSUP_EVENT_TYPE] {
+            assert_eq!(db.get_selfreport_field(kind, "luna"), "");
+            db.log_selfreport_event(kind, "luna", &format!("{kind}-text"))
+                .unwrap();
+            assert_eq!(
+                db.get_selfreport_field(kind, "luna"),
+                format!("{kind}-text")
+            );
+        }
 
         cleanup_test_db(db_path);
     }
 
     #[test]
-    fn test_doing_latest_wins() {
+    fn test_selfreport_latest_wins() {
         let (db, db_path) = setup_full_test_db();
 
-        db.log_doing_event("luna", "first").unwrap();
-        db.log_doing_event("luna", "second").unwrap();
-        assert_eq!(db.get_doing("luna"), "second");
+        db.log_selfreport_event(DOING_EVENT_TYPE, "luna", "first")
+            .unwrap();
+        db.log_selfreport_event(DOING_EVENT_TYPE, "luna", "second")
+            .unwrap();
+        assert_eq!(db.get_selfreport_field(DOING_EVENT_TYPE, "luna"), "second");
 
         // Empty text is how an agent clears it — not a no-op write.
-        db.log_doing_event("luna", "").unwrap();
-        assert_eq!(db.get_doing("luna"), "");
+        db.log_selfreport_event(DOING_EVENT_TYPE, "luna", "")
+            .unwrap();
+        assert_eq!(db.get_selfreport_field(DOING_EVENT_TYPE, "luna"), "");
+
+        cleanup_test_db(db_path);
+    }
+
+    /// The three kinds share one table and one query, so a write to one leaking
+    /// into another's slot is the failure mode this pins.
+    #[test]
+    fn test_selfreport_kinds_do_not_leak_into_each_other() {
+        let (db, db_path) = setup_full_test_db();
+
+        db.log_selfreport_event(EPIC_EVENT_TYPE, "luna", "migrate auth to OIDC")
+            .unwrap();
+        db.log_selfreport_event(DOING_EVENT_TYPE, "luna", "writing rotation tests")
+            .unwrap();
+        db.log_selfreport_event(HEADSUP_EVENT_TYPE, "luna", "restarting pg on 5432")
+            .unwrap();
+
+        let report = db.get_selfreport("luna");
+        assert_eq!(report.epic, "migrate auth to OIDC");
+        assert_eq!(report.doing, "writing rotation tests");
+        assert_eq!(report.headsup, "restarting pg on 5432");
+        assert!(report.doing_at.is_some(), "doing must carry its timestamp");
+
+        let map = db.get_selfreport_map();
+        assert_eq!(map.get("luna"), Some(&report));
+
+        cleanup_test_db(db_path);
+    }
+
+    /// An agent that cleared every field advertises nothing and must not appear
+    /// as a ghost row in the digest.
+    #[test]
+    fn test_selfreport_map_drops_fully_cleared_agents() {
+        let (db, db_path) = setup_full_test_db();
+
+        db.log_selfreport_event(DOING_EVENT_TYPE, "luna", "something")
+            .unwrap();
+        assert!(db.get_selfreport_map().contains_key("luna"));
+
+        db.log_selfreport_event(DOING_EVENT_TYPE, "luna", "")
+            .unwrap();
+        assert!(!db.get_selfreport_map().contains_key("luna"));
 
         cleanup_test_db(db_path);
     }
 
     #[test]
-    fn test_doing_map_is_per_instance_latest() {
+    fn test_selfreport_map_is_per_instance_latest() {
         let (db, db_path) = setup_full_test_db();
 
-        db.log_doing_event("luna", "luna-old").unwrap();
-        db.log_doing_event("nova", "nova-only").unwrap();
-        db.log_doing_event("luna", "luna-new").unwrap();
+        db.log_selfreport_event(DOING_EVENT_TYPE, "luna", "luna-old")
+            .unwrap();
+        db.log_selfreport_event(DOING_EVENT_TYPE, "nova", "nova-only")
+            .unwrap();
+        db.log_selfreport_event(DOING_EVENT_TYPE, "luna", "luna-new")
+            .unwrap();
         // An unrelated event type must not leak into the map.
         db.log_event("status", "zeta", &serde_json::json!({"status": "active"}))
             .unwrap();
 
-        let map = db.get_doing_map();
-        assert_eq!(map.get("luna").map(String::as_str), Some("luna-new"));
-        assert_eq!(map.get("nova").map(String::as_str), Some("nova-only"));
+        let map = db.get_selfreport_map();
+        assert_eq!(map.get("luna").map(|r| r.doing.as_str()), Some("luna-new"));
+        assert_eq!(map.get("nova").map(|r| r.doing.as_str()), Some("nova-only"));
         assert!(!map.contains_key("zeta"));
 
         cleanup_test_db(db_path);

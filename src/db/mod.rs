@@ -22,6 +22,7 @@ use rusqlite::{Connection, Transaction, TransactionBehavior};
 
 use crate::shared::time::now_epoch_f64;
 
+pub(crate) mod claims;
 mod claude_actors;
 mod events;
 mod instances;
@@ -31,14 +32,18 @@ pub(crate) mod reqwatch_policy;
 mod sessions;
 pub(crate) mod subscriptions;
 
+pub use claims::DEFAULT_CLAIM_TTL_SECS;
 pub use events::Message;
-pub use events::{DOING_EVENT_TYPE, doing_map_from_conn};
+pub use events::{
+    DOING_EVENT_TYPE, EPIC_EVENT_TYPE, HEADSUP_EVENT_TYPE, SELFREPORT_EVENT_TYPES, SelfReport,
+    selfreport_map_from_conn,
+};
 pub use instances::InstanceRow;
 #[allow(unused_imports)]
 pub use instances::InstanceStatus;
 
 /// Schema version - bump on any schema change.
-const SCHEMA_VERSION: i32 = 18;
+const SCHEMA_VERSION: i32 = 19;
 pub const DEV_ROOT_KV_KEY: &str = "config:dev_root";
 const MIGRATIONS: &[(i32, &str)] = &[
     (
@@ -67,6 +72,19 @@ const MIGRATIONS: &[(i32, &str)] = &[
              ON claude_actor_capabilities(expires_at);
          CREATE INDEX IF NOT EXISTS idx_claude_actor_session
              ON claude_actor_capabilities(session_id);",
+    ),
+    (
+        19,
+        "CREATE TABLE IF NOT EXISTS claims (
+             id INTEGER PRIMARY KEY AUTOINCREMENT,
+             instance TEXT NOT NULL,
+             pattern TEXT NOT NULL,
+             created_at INTEGER NOT NULL,
+             expires_at INTEGER NOT NULL,
+             released_at INTEGER DEFAULT NULL
+         );
+         CREATE INDEX IF NOT EXISTS idx_claims_live ON claims(released_at, expires_at);
+         CREATE INDEX IF NOT EXISTS idx_claims_instance ON claims(instance);",
     ),
 ];
 
@@ -360,6 +378,18 @@ impl HcomDb {
             -- KV table
             CREATE TABLE IF NOT EXISTS kv (key TEXT PRIMARY KEY, value TEXT);
 
+            -- Advisory path reservations (`hcom claim`)
+            CREATE TABLE IF NOT EXISTS claims (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                instance TEXT NOT NULL,
+                pattern TEXT NOT NULL,
+                created_at INTEGER NOT NULL,
+                expires_at INTEGER NOT NULL,
+                released_at INTEGER DEFAULT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_claims_live ON claims(released_at, expires_at);
+            CREATE INDEX IF NOT EXISTS idx_claims_instance ON claims(instance);
+
             -- Event indexes
             CREATE INDEX IF NOT EXISTS idx_timestamp ON events(timestamp);
             CREATE INDEX IF NOT EXISTS idx_type ON events(type);
@@ -537,6 +567,7 @@ impl HcomDb {
             "notify_endpoints",
             "session_bindings",
             "claude_actor_capabilities",
+            "claims",
         ]
         .into_iter()
         .collect();
@@ -976,13 +1007,13 @@ pub(super) fn chrono_now_iso() -> String {
 }
 
 #[cfg(test)]
-pub(super) mod tests {
+pub(crate) mod tests {
     use super::*;
     use rusqlite::{Connection, params};
     use std::path::PathBuf;
 
     /// Clean up test database
-    pub(super) fn cleanup_test_db(path: PathBuf) {
+    pub(crate) fn cleanup_test_db(path: PathBuf) {
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_file(PathBuf::from(format!("{}-wal", path.display())));
         let _ = std::fs::remove_file(PathBuf::from(format!("{}-shm", path.display())));
@@ -1155,7 +1186,7 @@ pub(super) mod tests {
     }
 
     /// Create a test DB with full init_db() schema
-    pub(super) fn setup_full_test_db() -> (HcomDb, PathBuf) {
+    pub(crate) fn setup_full_test_db() -> (HcomDb, PathBuf) {
         use std::sync::atomic::{AtomicU64, Ordering};
         static COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -1510,6 +1541,86 @@ pub(super) mod tests {
         cleanup_test_db(db_path);
     }
 
+    /// v19 adds the `claims` table. An existing DB must gain it by MIGRATION
+    /// (preserving its rows), not by being archived and recreated — an upgrade
+    /// that silently throws away an agent's history would be a data-loss bug.
+    #[test]
+    fn test_ensure_schema_migrates_v18_to_v19_adding_claims_and_keeping_data() {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static COUNTER: AtomicU64 = AtomicU64::new(2850);
+
+        let temp_dir = std::env::temp_dir();
+        let test_id = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let db_path = temp_dir.join(format!(
+            "test_hcom_migrate_claims_{}_{}.db",
+            std::process::id(),
+            test_id
+        ));
+
+        {
+            let conn = Connection::open(&db_path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE events (id INTEGER PRIMARY KEY, timestamp TEXT, type TEXT, instance TEXT, data TEXT);
+                 CREATE TABLE instances (
+                     name TEXT PRIMARY KEY,
+                     tool TEXT DEFAULT 'claude',
+                     created_at REAL NOT NULL,
+                     launch_context TEXT DEFAULT '',
+                     terminal_preset_requested TEXT DEFAULT '',
+                     terminal_preset_effective TEXT DEFAULT '',
+                     last_seen INTEGER DEFAULT 0
+                 );
+                 CREATE TABLE kv (key TEXT PRIMARY KEY, value TEXT);
+                 CREATE TABLE notify_endpoints (instance TEXT, kind TEXT, port INTEGER, updated_at REAL, PRIMARY KEY(instance, kind));
+                 CREATE TABLE session_bindings (session_id TEXT PRIMARY KEY, instance_name TEXT NOT NULL, created_at REAL NOT NULL);
+                 CREATE TABLE claude_actor_capabilities (
+                     token TEXT PRIMARY KEY,
+                     session_id TEXT NOT NULL,
+                     tool_use_id TEXT NOT NULL,
+                     agent_id TEXT NOT NULL DEFAULT '',
+                     instance_name TEXT NOT NULL,
+                     created_at INTEGER NOT NULL,
+                     expires_at INTEGER NOT NULL,
+                     last_seen INTEGER NOT NULL,
+                     UNIQUE(session_id, tool_use_id, agent_id)
+                 );
+                 PRAGMA user_version = 18;",
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO instances (name, tool, created_at) VALUES (?1, ?2, ?3)",
+                rusqlite::params!["luna", "claude", 1.0f64],
+            )
+            .unwrap();
+        }
+
+        let mut db = HcomDb::open_raw(&db_path).unwrap();
+        db.ensure_schema().unwrap();
+
+        let version: i32 = db
+            .conn
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, SCHEMA_VERSION);
+
+        // The table exists and is usable, not merely declared.
+        db.add_claim("luna", "src/auth/**", 1800).unwrap();
+        assert_eq!(db.live_claims_for("luna").len(), 1);
+
+        // The pre-existing row survived: this was a migration, not an archive.
+        let name: String = db
+            .conn
+            .query_row(
+                "SELECT name FROM instances WHERE name = ?",
+                params!["luna"],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(name, "luna");
+
+        cleanup_test_db(db_path);
+    }
+
     #[test]
     fn test_ensure_schema_column_guard() {
         use std::sync::atomic::{AtomicU64, Ordering};
@@ -1542,6 +1653,14 @@ pub(super) mod tests {
                      expires_at INTEGER NOT NULL,
                      last_seen INTEGER NOT NULL,
                      UNIQUE(session_id, tool_use_id, agent_id)
+                 );
+                 CREATE TABLE claims (
+                     id INTEGER PRIMARY KEY AUTOINCREMENT,
+                     instance TEXT NOT NULL,
+                     pattern TEXT NOT NULL,
+                     created_at INTEGER NOT NULL,
+                     expires_at INTEGER NOT NULL,
+                     released_at INTEGER DEFAULT NULL
                  );
                  PRAGMA user_version = {};",
                 SCHEMA_VERSION

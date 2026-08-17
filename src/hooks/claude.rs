@@ -1514,6 +1514,34 @@ fn handle_pretooluse(
 
     common::update_tool_status(db, instance_name, "claude", tool_name, tool_input);
 
+    // Anti-thrash: warn before a write into a path another agent has claimed.
+    // This is the point of a claim - the existing `collision` subscription only
+    // notifies both agents AFTER they have already both edited the file.
+    if let Some(target) = family::extract_file_target("claude", tool_name, tool_input)
+        && let Some(warning) = crate::forum::claim_advisory(db, instance_name, &target)
+    {
+        if crate::forum::claim_blocks() {
+            let output = serde_json::json!({
+                "hookSpecificOutput": {
+                    "hookEventName": "PreToolUse",
+                    "permissionDecision": "deny",
+                    "permissionDecisionReason": warning,
+                }
+            });
+            return (0, serde_json::to_string(&output).unwrap_or_default());
+        }
+        // Advisory by default: say it and let the write proceed. A claim held by
+        // a crashed agent must never be able to wedge a peer.
+        let output = serde_json::json!({
+            "systemMessage": warning.clone(),
+            "hookSpecificOutput": {
+                "hookEventName": "PreToolUse",
+                "additionalContext": warning,
+            }
+        });
+        return (0, serde_json::to_string(&output).unwrap_or_default());
+    }
+
     if !is_shell_tool(tool_name) {
         return (0, String::new());
     }
@@ -1744,6 +1772,19 @@ fn handle_posttooluse(
     if let Some((output, ack)) = get_posttooluse_messages(db, instance_name) {
         outputs.push(output);
         delivery_ack = Some(ack);
+    }
+
+    // Cadence: remind the agent to refresh its `doing` when it has gone stale.
+    // PostToolUse is the right place because it fires on every turn whether or
+    // not a message arrived - the reminder must not depend on inbound traffic.
+    // `staleness_nudge` owns the rate limit, so this cannot fire every call.
+    if let Some(nudge) = crate::forum::staleness_nudge(db, instance_name) {
+        outputs.push(serde_json::json!({
+            "hookSpecificOutput": {
+                "hookEventName": "PostToolUse",
+                "additionalContext": nudge,
+            },
+        }));
     }
 
     if !outputs.is_empty() {

@@ -23,7 +23,11 @@ fn is_hook(name: &str) -> bool {
 const COMMANDS: &[&str] = &[
     "send",
     "list",
+    "forum",
+    "epic",
     "doing",
+    "heads-up",
+    "claim",
     "events",
     "stop",
     "start",
@@ -595,7 +599,11 @@ pub fn dispatch() -> anyhow::Result<()> {
                 cmd.as_str(),
                 "send"
                     | "list"
+                    | "forum"
+                    | "epic"
                     | "doing"
+                    | "heads-up"
+                    | "claim"
                     | "stop"
                     | "listen"
                     | "events"
@@ -817,8 +825,29 @@ fn dispatch_native_command(cmd: &str, args: &[String]) -> i32 {
         "list" => clap_dispatch!(crate::commands::list::ListArgs, cmd, &cmd_argv, |args| {
             crate::commands::list::cmd_list(&db, &args, Some(&ctx))
         }),
-        "doing" => clap_dispatch!(crate::commands::doing::DoingArgs, cmd, &cmd_argv, |args| {
-            crate::commands::doing::cmd_doing(&db, &args, Some(&ctx))
+        "forum" => clap_dispatch!(crate::commands::forum::ForumArgs, cmd, &cmd_argv, |args| {
+            crate::commands::forum::cmd_forum(&db, &args)
+        }),
+        "epic" => clap_dispatch!(
+            crate::commands::selfreport::EpicArgs,
+            cmd,
+            &cmd_argv,
+            |args| { crate::commands::selfreport::cmd_epic(&db, &args, Some(&ctx)) }
+        ),
+        "doing" => clap_dispatch!(
+            crate::commands::selfreport::DoingArgs,
+            cmd,
+            &cmd_argv,
+            |args| { crate::commands::selfreport::cmd_doing(&db, &args, Some(&ctx)) }
+        ),
+        "heads-up" => clap_dispatch!(
+            crate::commands::selfreport::HeadsUpArgs,
+            cmd,
+            &cmd_argv,
+            |args| { crate::commands::selfreport::cmd_headsup(&db, &args, Some(&ctx)) }
+        ),
+        "claim" => clap_dispatch!(crate::commands::claim::ClaimArgs, cmd, &cmd_argv, |args| {
+            crate::commands::claim::cmd_claim(&db, &args, Some(&ctx))
         }),
         "stop" => clap_dispatch!(crate::commands::stop::StopArgs, cmd, &cmd_argv, |args| {
             crate::commands::stop::cmd_stop(&db, &args, Some(&ctx))

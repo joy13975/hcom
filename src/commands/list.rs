@@ -235,7 +235,7 @@ pub fn cmd_list(db: &HcomDb, args: &ListArgs, ctx: Option<&CommandContext>) -> i
     if json_output || format_template.is_some() {
         let mut result_list: Vec<serde_json::Value> = Vec::new();
         // One query for the whole listing rather than one per agent.
-        let doing_map = db.get_doing_map();
+        let report_map = db.get_selfreport_map();
 
         for data in &sorted_instances {
             let full_name = get_full_name(data);
@@ -261,7 +261,9 @@ pub fn cmd_list(db: &HcomDb, args: &ListArgs, ctx: Option<&CommandContext>) -> i
                 "status_detail": data.status_detail,
                 "status_age_seconds": age_seconds,
                 "description": description,
-                "doing": doing_map.get(&data.name).cloned().unwrap_or_default(),
+                "epic": report_map.get(&data.name).map(|r| r.epic.clone()).unwrap_or_default(),
+                "doing": report_map.get(&data.name).map(|r| r.doing.clone()).unwrap_or_default(),
+                "headsup": report_map.get(&data.name).map(|r| r.headsup.clone()).unwrap_or_default(),
                 "unread_count": unread_counts.get(&data.name).copied().unwrap_or(0),
                 "headless": data.background != 0,
                 "session_id": data.session_id.as_deref().unwrap_or(""),
@@ -381,7 +383,7 @@ pub fn cmd_list(db: &HcomDb, args: &ListArgs, ctx: Option<&CommandContext>) -> i
     }
     let name_col_width = (max_name_len + 2).max(14);
     // One query for the whole listing rather than one per agent.
-    let doing_map = db.get_doing_map();
+    let report_map = db.get_selfreport_map();
 
     for data in &sorted_instances {
         let name = get_full_name(data);
@@ -470,15 +472,23 @@ pub fn cmd_list(db: &HcomDb, args: &ListArgs, ctx: Option<&CommandContext>) -> i
         };
 
         // Self-reported activity, so a glance at the roster shows what each
-        // agent is working on and not merely whether it is awake.
-        let doing_text = match doing_map.get(&data.name) {
-            Some(doing) if !doing.is_empty() => format!(" - {}", truncate_display(doing, 50)),
+        // agent is working on and not merely whether it is awake. A heads-up is
+        // flagged inline (`!`) rather than printed here, because the roster line
+        // is one line per agent and a warning peers must not miss deserves the
+        // full text `hcom forum` gives it.
+        let report = report_map.get(&data.name);
+        let doing_text = match report {
+            Some(r) if !r.doing.is_empty() => format!(" - {}", truncate_display(&r.doing, 50)),
             _ => String::new(),
+        };
+        let headsup_flag = match report {
+            Some(r) if !r.headsup.is_empty() => " !",
+            _ => "",
         };
 
         let name_part = format!("{name}{headless_badge}{remote_badge}{unread_str}");
         let status_text = format!(
-            "{age_display}{desc_sep}{description}{listening_since}{timeout_marker}{doing_text}"
+            "{age_display}{desc_sep}{description}{listening_since}{timeout_marker}{doing_text}{headsup_flag}"
         );
 
         println!(
@@ -562,8 +572,19 @@ pub fn cmd_list(db: &HcomDb, args: &ListArgs, ctx: Option<&CommandContext>) -> i
                 );
             }
             // Untruncated here: -v is where you go for the full text.
-            if let Some(doing) = doing_map.get(&data.name).filter(|d| !d.is_empty()) {
-                println!("    doing:        {doing}");
+            if let Some(report) = report_map.get(&data.name) {
+                if !report.epic.is_empty() {
+                    println!("    epic:         {}", report.epic);
+                }
+                if !report.doing.is_empty() {
+                    println!("    doing:        {}", report.doing);
+                }
+                if !report.headsup.is_empty() {
+                    println!("    heads-up:     {}", report.headsup);
+                }
+            }
+            for claim in db.live_claims_for(&data.name) {
+                println!("    claims:       {}", claim.pattern);
             }
             println!();
         }
@@ -629,11 +650,32 @@ fn print_instance_details(db: &HcomDb, data: &InstanceRow, display_name: &str) {
 
     println!("{display_name}:");
 
-    // What the agent says it is working on, ahead of the mechanical fields:
-    // it is the first thing a peer inspecting this agent wants.
-    let doing = db.get_doing(&data.name);
-    if !doing.is_empty() {
-        println!("  Doing:       {doing}");
+    // What the agent says about itself, ahead of the mechanical fields: it is
+    // the first thing a peer inspecting this agent wants.
+    let report = db.get_selfreport(&data.name);
+    if !report.epic.is_empty() {
+        println!("  Epic:        {}", report.epic);
+    }
+    if !report.doing.is_empty() {
+        println!("  Doing:       {}", report.doing);
+    }
+    if !report.headsup.is_empty() {
+        println!("  Heads-up:    {}", report.headsup);
+    }
+    let held = db.live_claims_for(&data.name);
+    if !held.is_empty() {
+        let now = crate::shared::time::now_epoch_i64();
+        let patterns: Vec<String> = held
+            .iter()
+            .map(|c| {
+                format!(
+                    "{} ({})",
+                    c.pattern,
+                    crate::shared::time::format_age(c.expires_in(now))
+                )
+            })
+            .collect();
+        println!("  Claims:      {}", patterns.join(", "));
     }
 
     // Core Identity

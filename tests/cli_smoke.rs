@@ -1245,8 +1245,7 @@ fn doing_rejects_terminal_escape_and_newline_injection() {
     // Terminal-escape injection: an ESC (0x1B) sequence would clear/recolor a
     // peer's screen and fake a roster row when rendered raw via println!. It
     // must be rejected at the write boundary and never stored.
-    let (code, _stdout, stderr) =
-        h.run(["doing", "--name", &me, "\x1b[2J\x1b[31mSYSTEM ALERT"]);
+    let (code, _stdout, stderr) = h.run(["doing", "--name", &me, "\x1b[2J\x1b[31mSYSTEM ALERT"]);
     assert_ne!(code, 0, "escape sequence must be rejected; stderr={stderr}");
 
     // Newline injection: `doing` renders on one roster line, so a value that
@@ -1261,4 +1260,190 @@ fn doing_rejects_terminal_escape_and_newline_injection() {
         stdout.contains("nothing set"),
         "rejected writes must not be stored; stdout={stdout}"
     );
+}
+
+/// The write-boundary guard must cover every self-report verb, not just `doing`
+/// — they all render raw on peer terminals through the same sinks.
+#[test]
+fn every_selfreport_verb_rejects_escape_injection() {
+    let h = Hcom::new();
+    let me = h.start();
+
+    for verb in ["epic", "doing", "heads-up"] {
+        let (code, _stdout, stderr) = h.run([verb, "--name", &me, "\x1b[2Jfake"]);
+        assert_ne!(
+            code, 0,
+            "{verb} must reject an escape sequence; stderr={stderr}"
+        );
+    }
+    // A claim pattern is rendered the same way and needs the same guard.
+    let (code, _stdout, stderr) = h.run(["claim", "--name", &me, "\x1b[2Jsrc/**"]);
+    assert_ne!(
+        code, 0,
+        "claim must reject an escape sequence; stderr={stderr}"
+    );
+}
+
+#[test]
+fn epic_doing_headsup_are_independent_and_visible_in_the_forum() {
+    let h = Hcom::new();
+    let me = h.start();
+
+    // Nothing posted yet: the digest must say so and say how to participate,
+    // rather than printing an empty page.
+    let (code, stdout, stderr) = h.run(["forum"]);
+    assert_eq!(code, 0, "forum (empty) stderr={stderr}");
+    assert!(stdout.contains("Nobody has posted"), "stdout={stdout}");
+    assert!(stdout.contains("hcom epic"), "stdout={stdout}");
+
+    assert_eq!(h.run(["epic", "--name", &me, "migrate auth to OIDC"]).0, 0);
+    assert_eq!(
+        h.run(["doing", "--name", &me, "writing rotation tests"]).0,
+        0
+    );
+    assert_eq!(
+        h.run(["heads-up", "--name", &me, "restarting pg on 5432"])
+            .0,
+        0
+    );
+
+    // Each verb reads back only its own field — one shared table, three slots.
+    let (_, stdout, _) = h.run(["epic", "--name", &me]);
+    assert!(stdout.contains("migrate auth to OIDC"), "stdout={stdout}");
+    assert!(!stdout.contains("rotation tests"), "leaked doing: {stdout}");
+    let (_, stdout, _) = h.run(["heads-up", "--name", &me]);
+    assert!(stdout.contains("restarting pg on 5432"), "stdout={stdout}");
+    assert!(!stdout.contains("OIDC"), "leaked epic: {stdout}");
+
+    // The digest carries all three, and the doing line carries its age so a
+    // stale report is visibly stale rather than reading as current.
+    let (code, stdout, stderr) = h.run(["forum"]);
+    assert_eq!(code, 0, "forum stderr={stderr}");
+    assert!(stdout.contains("migrate auth to OIDC"), "stdout={stdout}");
+    assert!(stdout.contains("writing rotation tests"), "stdout={stdout}");
+    assert!(stdout.contains("restarting pg on 5432"), "stdout={stdout}");
+    // A freshly written report reads "(just now)"; an older one reads "(Nm ago)".
+    // Never "(now ago)", which is what naive age formatting produces.
+    assert!(stdout.contains("(just now)"), "doing age missing: {stdout}");
+    assert!(!stdout.contains("now ago"), "malformed age: {stdout}");
+
+    // JSON for agents.
+    let (code, stdout, stderr) = h.run(["forum", "--json"]);
+    assert_eq!(code, 0, "forum --json stderr={stderr}");
+    let payload: serde_json::Value =
+        serde_json::from_str(&stdout).unwrap_or_else(|e| panic!("forum json: {e}\n{stdout}"));
+    let mine = payload
+        .as_array()
+        .and_then(|a| a.iter().find(|v| v["name"] == me.as_str()))
+        .unwrap_or_else(|| panic!("{me} missing from forum: {stdout}"));
+    assert_eq!(mine["epic"].as_str(), Some("migrate auth to OIDC"));
+    assert_eq!(mine["doing"].as_str(), Some("writing rotation tests"));
+    assert_eq!(mine["headsup"].as_str(), Some("restarting pg on 5432"));
+    assert!(
+        mine["doing_age_seconds"].as_i64().is_some(),
+        "forum json must expose the doing age: {stdout}"
+    );
+
+    // And all three reach `list --json`, so existing consumers see them too.
+    let (_, stdout, _) = h.run(["list", "--json"]);
+    let agents: serde_json::Value =
+        serde_json::from_str(&stdout).unwrap_or_else(|e| panic!("list json: {e}\n{stdout}"));
+    let mine = agents
+        .as_array()
+        .and_then(|a| a.iter().find(|v| v["base_name"] == me.as_str()))
+        .unwrap_or_else(|| panic!("{me} missing from list: {stdout}"));
+    assert_eq!(mine["epic"].as_str(), Some("migrate auth to OIDC"));
+    assert_eq!(mine["headsup"].as_str(), Some("restarting pg on 5432"));
+
+    // Each kind is independently filterable through the shared event gate.
+    for (kind, text) in [
+        ("epic", "migrate auth to OIDC"),
+        ("doing", "writing rotation tests"),
+        ("headsup", "restarting pg on 5432"),
+    ] {
+        let (code, stdout, stderr) = h.run(["events", "--type", kind, "--last", "10"]);
+        assert_eq!(code, 0, "events --type {kind} stderr={stderr}");
+        assert!(stdout.contains(text), "--type {kind} stdout={stdout}");
+    }
+}
+
+#[test]
+fn a_claim_warns_a_peer_and_stops_warning_once_released() {
+    let h = Hcom::new();
+    let holder = h.start_with_process_id("claim-holder");
+    let peer = h.start_with_process_id("claim-peer");
+    assert_ne!(holder, peer, "need two distinct identities");
+
+    assert_eq!(
+        h.run_as_process("claim-holder", ["claim", "src/auth/**"]).0,
+        0
+    );
+
+    // Visible to everyone, with its holder named.
+    let (code, stdout, stderr) = h.run(["claim", "--list"]);
+    assert_eq!(code, 0, "claim --list stderr={stderr}");
+    assert!(stdout.contains(&holder), "stdout={stdout}");
+    assert!(stdout.contains("src/auth/**"), "stdout={stdout}");
+
+    // The holder is never warned about its own claim; a peer is.
+    let (_, stdout, _) = h.run_as_process("claim-holder", ["claim", "src/auth/token.rs"]);
+    assert!(
+        !stdout.contains("already claims"),
+        "an agent must not be warned about its own claim: {stdout}"
+    );
+    let (code, stdout, stderr) = h.run_as_process("claim-peer", ["claim", "src/auth/token.rs"]);
+    assert_eq!(code, 0, "peer claim stderr={stderr}");
+    assert!(
+        stdout.contains("already claims") && stdout.contains(&holder),
+        "a peer must be told who already holds an overlapping path: {stdout}"
+    );
+
+    // Releasing clears it for everyone.
+    assert_eq!(
+        h.run_as_process("claim-holder", ["claim", "--release", "src/auth/**"])
+            .0,
+        0
+    );
+    let (_, stdout, _) = h.run(["claim", "--list"]);
+    assert!(
+        !stdout.contains("src/auth/**"),
+        "released claim still live: {stdout}"
+    );
+
+    // Releasing something you do not hold is a reported no-op, not a lie.
+    let (code, stdout, _) = h.run_as_process("claim-holder", ["claim", "--release", "nope/**"]);
+    assert_eq!(code, 0);
+    assert!(stdout.contains("no live claim"), "stdout={stdout}");
+}
+
+#[test]
+fn a_claim_with_an_invalid_ttl_or_glob_fails_loudly() {
+    let h = Hcom::new();
+    let me = h.start();
+
+    for bad_ttl in ["0", "-5m", "soon"] {
+        let (code, stdout, _) = h.run(["claim", "--name", &me, "src/**", "--ttl", bad_ttl]);
+        assert_ne!(code, 0, "--ttl {bad_ttl} must be rejected; stdout={stdout}");
+    }
+    // A pattern that cannot compile would store a claim that silently never
+    // matches anything, which is worse than an error.
+    let (code, stdout, _) = h.run(["claim", "--name", &me, "src/[unclosed"]);
+    assert_ne!(code, 0, "invalid glob must be rejected; stdout={stdout}");
+}
+
+#[test]
+fn claim_and_selfreport_reject_an_unregistered_agent() {
+    let h = Hcom::new();
+    for args in [
+        vec!["epic", "--name", "ghost", "x"],
+        vec!["heads-up", "--name", "ghost", "x"],
+        vec!["claim", "--name", "ghost", "src/**"],
+    ] {
+        let verb = args[0];
+        let (code, stdout, stderr) = h.run(args.clone());
+        assert_ne!(
+            code, 0,
+            "{verb} for an unknown name must fail; stdout={stdout} stderr={stderr}"
+        );
+    }
 }

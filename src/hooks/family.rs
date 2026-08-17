@@ -49,6 +49,27 @@ pub fn extract_tool_detail(tool: &str, tool_name: &str, tool_input: &serde_json:
     String::new()
 }
 
+/// The file a tool call is about to write, or None if it is not a file operation.
+///
+/// Driven by the same per-tool `status_detail.file` spec as
+/// [`extract_tool_detail`], so it stays correct for every harness without a
+/// per-harness list of tool names. Used by the claim advisory, which must not
+/// mistake a Bash command string or a delegate prompt for a path.
+pub fn extract_file_target(
+    tool: &str,
+    tool_name: &str,
+    tool_input: &serde_json::Value,
+) -> Option<String> {
+    let tool_enum = tool.parse::<Tool>().ok()?;
+    let detail = &tool_enum.spec().status_detail;
+    let is_notebook_edit = tool_enum == Tool::Claude && tool_name == "NotebookEdit";
+    if !detail.file.contains(&tool_name) && !is_notebook_edit {
+        return None;
+    }
+    let path = extract_tool_detail(tool, tool_name, tool_input);
+    if path.is_empty() { None } else { Some(path) }
+}
+
 /// Persist vanilla instance binding (session + transcript + tool).
 ///
 /// Called after marker extraction (each tool extracts differently).

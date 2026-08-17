@@ -1023,6 +1023,19 @@ fn format_sub_notification(
                 }
             }
         }
+        // Self-report kinds carry their text in `data.text`. Without an arm here
+        // the `forum` preset would deliver "[sub:x] #12 doing nene" with the text
+        // stripped, which is worse than not subscribing at all.
+        crate::db::EPIC_EVENT_TYPE
+        | crate::db::DOING_EVENT_TYPE
+        | crate::db::HEADSUP_EVENT_TYPE => {
+            let text = data.get("text").and_then(|v| v.as_str()).unwrap_or("");
+            if text.is_empty() {
+                parts.push("(cleared)".to_string());
+            } else {
+                parts.push(format!("\"{text}\""));
+            }
+        }
         "life" => {
             parts.push(
                 data.get("action")

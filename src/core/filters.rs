@@ -454,7 +454,9 @@ fn parse_timestamp(s: &str) -> Result<String, String> {
 pub struct EventFilterArgs {
     #[arg(long)]
     pub agent: Vec<String>,
-    #[arg(long = "type", value_parser = clap::builder::PossibleValuesParser::new(["message", "status", "life", crate::db::DOING_EVENT_TYPE]))]
+    // Values come from the event-type consts, not literals, so renaming a kind
+    // cannot silently leave this gate rejecting its own event type.
+    #[arg(long = "type", value_parser = clap::builder::PossibleValuesParser::new(["message", "status", "life", crate::db::EPIC_EVENT_TYPE, crate::db::DOING_EVENT_TYPE, crate::db::HEADSUP_EVENT_TYPE]))]
     pub event_type: Vec<String>,
     #[arg(long, value_parser = clap::builder::PossibleValuesParser::new(["active", "listening", "blocked", "inactive", "launching", "error"]))]
     pub status: Vec<String>,

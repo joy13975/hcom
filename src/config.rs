@@ -150,7 +150,23 @@ const TOML_KEY_MAP: &[(&str, &str)] = &[
     ("name_export", "preferences.name_export"),
     ("auto_trust_workspace", "launch.auto_trust_workspace"),
     ("title_mode", "terminal.title_mode"),
+    ("doing_max_age", "preferences.doing_max_age"),
+    ("doing_nudge", "preferences.doing_nudge"),
+    ("claim_block", "preferences.claim_block"),
 ];
+
+/// The nested TOML dotted path for a config field name, or None if the field has
+/// no file representation.
+///
+/// The single lookup over [`TOML_KEY_MAP`]; the CLI set/get path uses this rather
+/// than keeping its own copy of the table, because a divergence between the two
+/// silently writes a flat key that the loader never reads.
+pub fn toml_path_for_field(field_name: &str) -> Option<&'static str> {
+    TOML_KEY_MAP
+        .iter()
+        .find(|(field, _)| *field == field_name)
+        .map(|(_, path)| *path)
+}
 
 /// Mapping: HcomConfig field name -> HCOM_* env var key.
 const FIELD_TO_ENV: &[(&str, &str)] = &[
@@ -188,6 +204,9 @@ const FIELD_TO_ENV: &[(&str, &str)] = &[
     ("name_export", "HCOM_NAME_EXPORT"),
     ("auto_trust_workspace", "HCOM_AUTO_TRUST_WORKSPACE"),
     ("title_mode", "HCOM_TITLE_MODE"),
+    ("doing_max_age", "HCOM_DOING_MAX_AGE"),
+    ("doing_nudge", "HCOM_DOING_NUDGE"),
+    ("claim_block", "HCOM_CLAIM_BLOCK"),
 ];
 
 /// Relay fields — file-only, no env var override.
@@ -304,6 +323,16 @@ pub struct HcomConfig {
     /// `{icon} name [tool]` only, `"off"` leaves the tool's own title untouched.
     /// See [`crate::shared::TitleMode`].
     pub title_mode: String,
+    /// Seconds after which an agent's `doing` is considered stale and it is
+    /// nudged to refresh it. A self-report nobody refreshes turns into a lie, so
+    /// the cadence is enforced rather than merely suggested.
+    pub doing_max_age: i64,
+    /// Whether to emit the staleness nudge at all.
+    pub doing_nudge: bool,
+    /// When true, a `PreToolUse` write into another agent's claimed path is
+    /// denied instead of merely warned about. Off by default: a claim held by a
+    /// crashed agent would otherwise wedge every peer.
+    pub claim_block: bool,
 }
 
 impl Default for HcomConfig {
@@ -338,6 +367,9 @@ impl Default for HcomConfig {
             name_export: String::new(),
             auto_trust_workspace: true,
             title_mode: "combined".to_string(),
+            doing_max_age: 600,
+            doing_nudge: true,
+            claim_block: false,
         }
     }
 }
@@ -375,6 +407,18 @@ impl HcomConfig {
                 format!(
                     "subagent_timeout must be 1-86400 seconds, got {}",
                     self.subagent_timeout
+                ),
+            );
+        }
+
+        // Validate doing_max_age. A zero or negative window would mark every
+        // report stale the instant it is written, nudging on every single turn.
+        if !(30..=86400).contains(&self.doing_max_age) {
+            errors.insert(
+                "doing_max_age".into(),
+                format!(
+                    "doing_max_age must be 30-86400 seconds, got {}",
+                    self.doing_max_age
                 ),
             );
         }
@@ -524,6 +568,9 @@ impl HcomConfig {
                 Some(if self.auto_trust_workspace { "1" } else { "0" }.into())
             }
             "title_mode" => Some(self.title_mode.clone()),
+            "doing_max_age" => Some(self.doing_max_age.to_string()),
+            "doing_nudge" => Some(if self.doing_nudge { "1" } else { "0" }.into()),
+            "claim_block" => Some(if self.claim_block { "1" } else { "0" }.into()),
             _ => None,
         }
     }
@@ -578,6 +625,13 @@ impl HcomConfig {
             // The CLI set path (`config_set_at_path`) validates against
             // `VALID_TITLE_MODES` before this is ever written to the file.
             "title_mode" => self.title_mode = value.to_string(),
+            "doing_max_age" => {
+                self.doing_max_age = value
+                    .parse()
+                    .map_err(|_| format!("doing_max_age must be an integer, got '{value}'"))?;
+            }
+            "doing_nudge" => self.doing_nudge = !is_falsy(value),
+            "claim_block" => self.claim_block = !is_falsy(value),
             _ => return Err(format!("unknown field: {field}")),
         }
         Ok(())
@@ -655,7 +709,7 @@ impl HcomConfig {
         };
 
         // Load integer fields
-        for int_field in &["timeout", "subagent_timeout"] {
+        for int_field in &["timeout", "subagent_timeout", "doing_max_age"] {
             if let Some(val) = get_var(int_field) {
                 match val {
                     TomlFieldValue::Int(i) => {
@@ -706,7 +760,13 @@ impl HcomConfig {
         }
 
         // Load boolean fields
-        for bool_field in &["relay_enabled", "auto_approve", "auto_trust_workspace"] {
+        for bool_field in &[
+            "relay_enabled",
+            "auto_approve",
+            "auto_trust_workspace",
+            "doing_nudge",
+            "claim_block",
+        ] {
             if let Some(val) = get_var(bool_field) {
                 match val {
                     TomlFieldValue::Bool(b) => {
@@ -1055,6 +1115,9 @@ args = ""
 timeout = 86400
 auto_approve = true
 name_export = ""
+doing_max_age = 600
+doing_nudge = true
+claim_block = false
 "#;
     toml::Value::Table(toml_str.parse::<toml::Table>().unwrap())
 }
@@ -2207,6 +2270,11 @@ mod tests {
         assert_eq!(config.terminal, "default");
     }
 
+    /// Every field must survive serialize -> parse -> load. Each value here is
+    /// deliberately NON-default: a field that `to_toml_table` writes but
+    /// `load_from_sources` forgets to read reverts to its default here and fails,
+    /// which is the exact bug that made `hcom config claim_block 1` report success
+    /// while the setting never took effect.
     #[test]
     fn test_toml_roundtrip() {
         let config = HcomConfig {
@@ -2214,6 +2282,9 @@ mod tests {
             tag: "dev".to_string(),
             auto_approve: false,
             relay: "mqtt://test.com".to_string(),
+            doing_max_age: 1234,
+            doing_nudge: false,
+            claim_block: true,
             ..HcomConfig::default()
         };
 

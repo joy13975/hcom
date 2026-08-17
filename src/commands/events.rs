@@ -519,7 +519,7 @@ fn cmd_events_sub(db: &HcomDb, args: &EventsSubArgs, caller_name: Option<&str>) 
              \x20   --on-hit <TEXT>                 Attach message (sent from caller) when sub fires\n\n\
              Filters (same flag repeated = OR, different flags = AND):\n\
              \x20 --agent NAME                      Agent name\n\
-             \x20 --type TYPE                       message | status | life | doing\n\
+             \x20 --type TYPE                       message | status | life | epic | doing | headsup\n\
              \x20 --status VAL                      listening | active | blocked\n\
              \x20 --context PATTERN                 tool:Bash | deliver:X (supports * wildcard)\n\
              \x20 --action VAL                      created | started | ready | stopped | batch_launched | launch_failed | launch_blocked\n\
@@ -1405,20 +1405,19 @@ mod tests {
 
     /// The `--type` filter is a closed clap enum, so a newly logged event type
     /// is unreachable through `events`/`listen`/`events sub` until it is added
-    /// there too. `doing` is written by `hcom doing`.
+    /// there too. Iterating SELFREPORT_EVENT_TYPES means adding a fourth kind
+    /// without opening the gate fails HERE rather than silently returning no rows.
     #[test]
-    fn test_events_args_accept_doing_type() {
+    fn test_events_args_accept_every_selfreport_type() {
         use clap::Parser;
-        // Parse the SSOT const's value, then assert the parsed filter equals the
-        // const — so a rename of DOING_EVENT_TYPE that is not mirrored at the
-        // filter gate fails to compile/parse here rather than silently dropping
-        // `--type doing` results.
-        let args = EventsArgs::try_parse_from(["events", "--type", crate::db::DOING_EVENT_TYPE])
-            .unwrap();
-        assert_eq!(
-            args.filters.event_type,
-            vec![crate::db::DOING_EVENT_TYPE.to_string()]
-        );
+        // Parse each SSOT const's value, then assert the parsed filter equals the
+        // const — so a rename that is not mirrored at the filter gate fails to
+        // parse here instead of silently dropping results.
+        for kind in crate::db::SELFREPORT_EVENT_TYPES {
+            let args = EventsArgs::try_parse_from(["events", "--type", kind])
+                .unwrap_or_else(|e| panic!("--type {kind} rejected by the filter gate: {e}"));
+            assert_eq!(args.filters.event_type, vec![kind.to_string()]);
+        }
     }
 
     #[test]

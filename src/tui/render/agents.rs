@@ -1060,16 +1060,27 @@ fn build_agent_detail(agent: &Agent, app: &App, lines: &mut Vec<Line<'static>>, 
     finalize_detail_spans(&mut info, w);
     lines.push(Line::from(info));
 
-    // Line 3 (when set): what the agent says it is working on. Its own line
-    // because it is free text an agent wrote, not a fixed-width status field.
-    if let Some(doing) = app.data.doing.get(&agent.name).filter(|d| !d.is_empty()) {
-        let mut activity: Vec<Span<'static>> = vec![
-            Span::raw("  "),
-            Span::styled("doing: ", Theme::separator()),
-            Span::styled(doing.clone(), Theme::agent_context()),
-        ];
-        finalize_detail_spans(&mut activity, w);
-        lines.push(Line::from(activity));
+    // Lines 3+ (when set): what the agent advertises about itself. Each on its
+    // own line because these are free text an agent wrote, not fixed-width
+    // status fields. Order is epic (the line of work), then the current focus
+    // within it, then the warning peers must not miss.
+    if let Some(report) = app.data.selfreports.get(&agent.name) {
+        for (label, text) in [
+            ("epic: ", &report.epic),
+            ("doing: ", &report.doing),
+            ("heads-up: ", &report.headsup),
+        ] {
+            if text.is_empty() {
+                continue;
+            }
+            let mut row: Vec<Span<'static>> = vec![
+                Span::raw("  "),
+                Span::styled(label, Theme::separator()),
+                Span::styled(text.clone(), Theme::agent_context()),
+            ];
+            finalize_detail_spans(&mut row, w);
+            lines.push(Line::from(row));
+        }
     }
 
     // Separator line

@@ -60,11 +60,22 @@ You MUST use `hcom <cmd+flags> --name {instance_name}` for all hcom commands:
   Or (for code/md/backticks) instead of --: --file <path> | --base64 <string> | pipe/heredoc
   Example: send {target_luna} {target_nova} --intent ack --reply-to 82 --name {instance_name} -- 'ok'
 - See who's active: list [-v] [--json] [--names] [--format '{{name}} {{status}}'] [name]
-- Say what YOU are working on: doing 'short description'
-  Others see it in their `list`. Update it when you switch tasks; `doing ""` clears it.
+- READ THE FORUM: forum [--json]   <- what every agent is working on, warning about, and has claimed
+  Run it before you start work and whenever you get an <hcom> update. It is how you avoid
+  redoing or fighting another agent's work.
+- ADVERTISE YOUR OWN WORK (peers read these in `forum`; all three take "" to clear):
+  - epic 'one-liner'      your high-level line of work. Set it once, when you start.
+  - doing 'short desc'    what you are on RIGHT NOW. **Update at least every 5-10 min and
+                          whenever you switch focus** — a stale `doing` misleads every peer
+                          reading it as current, and hcom will nudge you when it goes stale.
+  - heads-up 'text'       what peers should watch out for or anticipate: a service you are
+                          restarting, a shared file you are rewriting, a migration mid-flight.
+- RESERVE PATHS before editing shared code: claim 'src/auth/**' [--ttl 30m]
+  claim --list (who holds what) | claim --release 'pattern' | claim --release --all
+  Advisory: peers get warned before they write there. Release when done.
 - Read another's conversation: transcript [name] [N-M] [--last N] [--full] | transcript search 'text' [--all]
 - View events: events [--last N] [--all] [--sql EXPR] [filters]
-  Filters (same flag=OR, different=AND): --agent NAME | --type message|status|life|doing | --status listening|active|blocked | --cmd PATTERN (contains, ^prefix, =exact) | --file PATH (*.py for glob, file.py for contains)
+  Filters (same flag=OR, different=AND): --agent NAME | --type message|status|life|epic|doing|headsup | --status listening|active|blocked | --cmd PATTERN (contains, ^prefix, =exact) | --file PATH (*.py for glob, file.py for contains)
   Event-based notifications, watch agents, subscribe, react: events sub [filters] | --help
 - Handoff context: bundle prepare
 - Spawn agents: [num] <{launch_tools}> [--tag labelOrGroup] [--terminal tmux|kitty|wezterm|etc]
@@ -84,6 +95,9 @@ If unsure about syntax, always run `hcom <command> --help` FIRST. Do not guess.
 2. No filler messages (greetings, thanks, congratulations).
 3. Use --intent on sends: request (want reply), inform (dont need reply), ack (responding).
 4. User says 'the gemini/claude/codex agent' or unclear → run `hcom list` to resolve name
+5. Set `epic` when you start. Keep `doing` current (every 5-10 min, and on every switch).
+   Run `hcom forum` before touching shared code, and `claim` the paths you are about to edit.
+   Post a `heads-up` before anything peers would be surprised by.
 
 Agent names are 4-letter CVCV words. When user mentions one, they mean an agent.
 {active_instances}
@@ -212,7 +226,11 @@ Commands:
   {hcom_cmd} send {target_name_s} [--intent request|inform|ack] [--reply-to <id>] [--thread <thread_name>] -- <"message"> (or --stdin, --file <path>, --base64 <string>)
   Example: {hcom_cmd} send {target_luna} {target_nova} --intent ack --reply-to 82 --name {subagent_name} -- "ok"  |  Code/markdown: replace "ok" with --file <path>
   {hcom_cmd} list --name {subagent_name}
-  {hcom_cmd} doing 'short description' --name {subagent_name}   (what you are working on)
+  {hcom_cmd} forum --name {subagent_name}                        (what every agent is working on)
+  {hcom_cmd} epic 'one-liner' --name {subagent_name}             (your line of work)
+  {hcom_cmd} doing 'short description' --name {subagent_name}    (what you are on now; refresh every 5-10 min)
+  {hcom_cmd} heads-up 'text' --name {subagent_name}              (what peers should watch out for)
+  {hcom_cmd} claim 'src/auth/**' --name {subagent_name}          (reserve paths before editing)
   {hcom_cmd} events --name {subagent_name}
   {hcom_cmd} <cmd> --help --name {subagent_name}
 

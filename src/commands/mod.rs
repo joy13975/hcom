@@ -16,9 +16,11 @@ pub mod stop;
 
 // Diagnostics
 pub mod bundle;
-pub mod doing;
+pub mod claim;
 pub mod events;
+pub mod forum;
 pub mod list;
+pub mod selfreport;
 pub mod status;
 pub mod term;
 pub mod transcript;

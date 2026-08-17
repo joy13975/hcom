@@ -12,6 +12,7 @@ mod config;
 pub mod core;
 mod db;
 mod delivery;
+pub mod forum;
 pub mod hooks;
 pub mod identity;
 mod instance_binding;

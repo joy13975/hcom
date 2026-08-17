@@ -466,11 +466,21 @@ fn start_rebind(
     );
 
     // A reclaim recreates the identity fresh (new instances row, cursor treated
-    // as a delivery boundary above), so the prior occupant's self-reported
-    // `doing` must not carry over — doing derivation is latest-event-wins per
-    // name with no lifetime scoping, so append an empty doing to reset it blank.
-    if let Err(e) = db.log_doing_event(&target_name, "") {
-        eprintln!("[hcom] warn: reset doing failed for {target_name}: {e}");
+    // as a delivery boundary above), so nothing the prior occupant of this name
+    // advertised may carry over: every self-report is derived latest-event-wins
+    // per NAME with no lifetime scoping, so each kind needs an empty event to
+    // reset it blank. Driven off SELFREPORT_EVENT_TYPES rather than a hand-listed
+    // set so a new kind cannot be added without inheriting this reset.
+    for kind in crate::db::SELFREPORT_EVENT_TYPES {
+        if let Err(e) = db.log_selfreport_event(kind, &target_name, "") {
+            eprintln!("[hcom] warn: reset {kind} failed for {target_name}: {e}");
+        }
+    }
+    // Same reasoning for claims: they are keyed by instance name, so a reclaimed
+    // name would otherwise inherit the dead agent's live path reservations and
+    // warn peers off files this session never intends to touch.
+    if let Err(e) = db.release_all_claims(&target_name) {
+        eprintln!("[hcom] warn: release claims failed for {target_name}: {e}");
     }
 
     if let Some(ref sid) = session_id {
@@ -1187,14 +1197,21 @@ mod tests {
 
     #[test]
     #[serial]
-    fn test_rebind_reclaim_clears_prior_doing() {
+    fn test_rebind_reclaim_clears_prior_selfreport_and_claims() {
         let (_dir, hcom_dir, _home, _guard) = crate::hooks::test_helpers::isolated_test_env();
         let db = HcomDb::open().unwrap();
         assert!(crate::hooks::claude::setup_claude_hooks(false));
 
-        // The prior occupant of the name advertised what it was working on.
-        db.log_doing_event("nova", "refactoring auth").unwrap();
-        assert_eq!(db.get_doing("nova"), "refactoring auth");
+        // The prior occupant of the name advertised all three fields and reserved
+        // a path. Every one of them is derived per NAME, so every one can be
+        // inherited by whoever reclaims the name.
+        for kind in crate::db::SELFREPORT_EVENT_TYPES {
+            db.log_selfreport_event(kind, "nova", &format!("prior {kind}"))
+                .unwrap();
+        }
+        db.add_claim("nova", "src/auth/**", 1800).unwrap();
+        assert_eq!(db.get_selfreport("nova").doing, "prior doing");
+        assert_eq!(db.live_claims_for("nova").len(), 1);
 
         // A different session reclaims the name via `start --as nova`.
         let ctx = make_claude_ctx(
@@ -1204,17 +1221,19 @@ mod tests {
         assert_eq!(start_bare(&db, &hcom_dir, &ctx, None).unwrap(), 0);
         assert_eq!(start_rebind(&db, "nova", &ctx, None).unwrap(), 0);
 
-        // The reclaimed identity must start blank, not inherit stale doing text
-        // this session never wrote.
-        assert_eq!(
-            db.get_doing("nova"),
-            "",
-            "a reclaimed name must not inherit the prior occupant's doing text"
+        // The reclaimed identity must start blank, not inherit state this session
+        // never wrote.
+        let report = db.get_selfreport("nova");
+        assert_eq!(report.epic, "", "must not inherit the prior epic");
+        assert_eq!(report.doing, "", "must not inherit the prior doing");
+        assert_eq!(report.headsup, "", "must not inherit the prior heads-up");
+        assert!(
+            !db.get_selfreport_map().contains_key("nova"),
+            "an all-cleared reclaimed name must not appear in the forum digest"
         );
-        assert_eq!(
-            db.get_doing_map().get("nova").map(String::as_str),
-            Some(""),
-            "the reclaimed name's doing resolves empty, which the roster renders as no activity"
+        assert!(
+            db.live_claims_for("nova").is_empty(),
+            "a reclaimed name must not inherit the prior occupant's path claims"
         );
     }
 

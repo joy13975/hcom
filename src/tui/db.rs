@@ -233,7 +233,7 @@ fn load_all(conn: &Connection, default_limit: usize) -> DataState {
         relay_enabled,
         relay_health,
         search_results: None,
-        doing: crate::db::doing_map_from_conn(conn),
+        selfreports: crate::db::selfreport_map_from_conn(conn),
     }
 }
 

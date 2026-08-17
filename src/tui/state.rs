@@ -23,11 +23,12 @@ pub struct DataState {
     pub relay_health: crate::relay::RelayHealth,
     /// FTS search results. `Some` when a text search query is active (both inline and vertical modes).
     pub search_results: Option<(Vec<Message>, Vec<Event>)>,
-    /// Self-reported activity per agent name (`hcom doing`), latest wins.
+    /// What each agent advertises about itself (`hcom epic` / `doing` /
+    /// `heads-up`), latest wins per field.
     ///
     /// Held beside the agents rather than on `Agent` because it comes from the
     /// event log, not the `instances` row the agent list is built from.
-    pub doing: std::collections::HashMap<String, String>,
+    pub selfreports: std::collections::HashMap<String, crate::db::SelfReport>,
 }
 
 impl DataState {
@@ -42,7 +43,7 @@ impl DataState {
             relay_enabled: false,
             relay_health: crate::relay::RelayHealth::NotConfigured,
             search_results: None,
-            doing: std::collections::HashMap::new(),
+            selfreports: std::collections::HashMap::new(),
         }
     }
 

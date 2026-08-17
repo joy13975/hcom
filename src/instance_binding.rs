@@ -994,11 +994,19 @@ fn auto_subscribe_defaults(db: &HcomDb, instance_name: &str, tool: &str) {
 
     use std::collections::HashMap;
 
+    // `forum` pushes peers' self-report changes mid-turn, so an agent learns what
+    // others are doing when it changes instead of having to remember to poll.
+    let forum_flags: Vec<(&str, &str)> = crate::db::SELFREPORT_EVENT_TYPES
+        .iter()
+        .map(|kind| ("type", *kind))
+        .collect();
+
     let preset_to_flags: HashMap<&str, Vec<(&str, &str)>> = HashMap::from([
         ("collision", vec![("collision", "1")]),
         ("created", vec![("action", "created")]),
         ("stopped", vec![("action", "stopped")]),
         ("blocked", vec![("status", "blocked")]),
+        ("forum", forum_flags),
     ]);
 
     for preset in config
@@ -1015,10 +1023,22 @@ fn auto_subscribe_defaults(db: &HcomDb, instance_name: &str, tool: &str) {
                     .or_default()
                     .push(val.to_string());
             }
+            // `forum` is about PEERS. Without this the subscriber is notified of
+            // its own epic/doing/heads-up writes, and since agents are told to
+            // refresh `doing` every few minutes that is a steady stream of an
+            // agent echoing itself back.
+            let extra_sql: Vec<String> = if preset == "forum" {
+                vec![format!(
+                    "events_v.instance != '{}'",
+                    instance_name.replace('\'', "''")
+                )]
+            } else {
+                Vec::new()
+            };
             let _ = crate::db::subscriptions::create_filter_subscription(
                 db,
                 &filters,
-                &[],
+                &extra_sql,
                 instance_name,
                 false,
                 None,
@@ -1860,6 +1880,41 @@ mod tests {
             .filter_map(|r| r.ok())
             .collect();
         assert_eq!(rows.len(), 1, "should have 1 subscription");
+
+        cleanup(path);
+    }
+
+    /// The `forum` preset must deliver PEERS' self-reports and never the
+    /// subscriber's own. Agents are instructed to refresh `doing` every few
+    /// minutes, so a self-matching subscription would echo every agent back to
+    /// itself on a timer.
+    #[test]
+    #[serial]
+    fn test_forum_auto_subscribe_excludes_the_subscribers_own_reports() {
+        let _env = EnvVarGuard::set("HCOM_AUTO_SUBSCRIBE", "forum");
+        let (db, path) = setup_test_db();
+
+        auto_subscribe_defaults(&db, "luna", "claude");
+
+        let sql: String = db
+            .conn()
+            .query_row(
+                "SELECT json_extract(value, '$.sql') FROM kv WHERE key LIKE 'events_sub:%'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("forum preset should create a subscription");
+
+        for kind in crate::db::SELFREPORT_EVENT_TYPES {
+            assert!(
+                sql.contains(kind),
+                "forum subscription must match {kind}: {sql}"
+            );
+        }
+        assert!(
+            sql.contains("events_v.instance != 'luna'"),
+            "forum subscription must exclude the subscriber's own events: {sql}"
+        );
 
         cleanup(path);
     }
