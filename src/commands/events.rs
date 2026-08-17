@@ -519,7 +519,7 @@ fn cmd_events_sub(db: &HcomDb, args: &EventsSubArgs, caller_name: Option<&str>) 
              \x20   --on-hit <TEXT>                 Attach message (sent from caller) when sub fires\n\n\
              Filters (same flag repeated = OR, different flags = AND):\n\
              \x20 --agent NAME                      Agent name\n\
-             \x20 --type TYPE                       message | status | life\n\
+             \x20 --type TYPE                       message | status | life | doing\n\
              \x20 --status VAL                      listening | active | blocked\n\
              \x20 --context PATTERN                 tool:Bash | deliver:X (supports * wildcard)\n\
              \x20 --action VAL                      created | started | ready | stopped | batch_launched | launch_failed | launch_blocked\n\
@@ -1401,6 +1401,16 @@ mod tests {
         assert_eq!(args.filters.agent, vec!["peso"]);
         assert_eq!(args.filters.event_type, vec!["message"]);
         assert!(args.subcmd.is_none());
+    }
+
+    /// The `--type` filter is a closed clap enum, so a newly logged event type
+    /// is unreachable through `events`/`listen`/`events sub` until it is added
+    /// there too. `doing` is written by `hcom doing`.
+    #[test]
+    fn test_events_args_accept_doing_type() {
+        use clap::Parser;
+        let args = EventsArgs::try_parse_from(["events", "--type", "doing"]).unwrap();
+        assert_eq!(args.filters.event_type, vec!["doing"]);
     }
 
     #[test]
