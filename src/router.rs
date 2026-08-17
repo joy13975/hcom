@@ -23,6 +23,7 @@ fn is_hook(name: &str) -> bool {
 const COMMANDS: &[&str] = &[
     "send",
     "list",
+    "doing",
     "events",
     "stop",
     "start",
@@ -594,6 +595,7 @@ pub fn dispatch() -> anyhow::Result<()> {
                 cmd.as_str(),
                 "send"
                     | "list"
+                    | "doing"
                     | "stop"
                     | "listen"
                     | "events"
@@ -814,6 +816,9 @@ fn dispatch_native_command(cmd: &str, args: &[String]) -> i32 {
         },
         "list" => clap_dispatch!(crate::commands::list::ListArgs, cmd, &cmd_argv, |args| {
             crate::commands::list::cmd_list(&db, &args, Some(&ctx))
+        }),
+        "doing" => clap_dispatch!(crate::commands::doing::DoingArgs, cmd, &cmd_argv, |args| {
+            crate::commands::doing::cmd_doing(&db, &args, Some(&ctx))
         }),
         "stop" => clap_dispatch!(crate::commands::stop::StopArgs, cmd, &cmd_argv, |args| {
             crate::commands::stop::cmd_stop(&db, &args, Some(&ctx))

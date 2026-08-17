@@ -32,6 +32,7 @@ mod sessions;
 pub(crate) mod subscriptions;
 
 pub use events::Message;
+pub use events::doing_map_from_conn;
 pub use instances::InstanceRow;
 #[allow(unused_imports)]
 pub use instances::InstanceStatus;

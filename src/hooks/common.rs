@@ -53,6 +53,7 @@ pub(crate) fn dispatch_with_panic_guard<R>(
 pub(crate) const SAFE_HCOM_COMMANDS: &[&str] = &[
     "send",
     "start",
+    "doing",
     "help",
     "--help",
     "-h",

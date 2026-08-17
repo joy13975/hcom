@@ -60,6 +60,8 @@ You MUST use `hcom <cmd+flags> --name {instance_name}` for all hcom commands:
   Or (for code/md/backticks) instead of --: --file <path> | --base64 <string> | pipe/heredoc
   Example: send {target_luna} {target_nova} --intent ack --reply-to 82 --name {instance_name} -- 'ok'
 - See who's active: list [-v] [--json] [--names] [--format '{{name}} {{status}}'] [name]
+- Say what YOU are working on: doing 'short description'
+  Others see it in their `list`. Update it when you switch tasks; `doing ""` clears it.
 - Read another's conversation: transcript [name] [N-M] [--last N] [--full] | transcript search 'text' [--all]
 - View events: events [--last N] [--all] [--sql EXPR] [filters]
   Filters (same flag=OR, different=AND): --agent NAME | --type message|status|life | --status listening|active|blocked | --cmd PATTERN (contains, ^prefix, =exact) | --file PATH (*.py for glob, file.py for contains)
@@ -210,6 +212,7 @@ Commands:
   {hcom_cmd} send {target_name_s} [--intent request|inform|ack] [--reply-to <id>] [--thread <thread_name>] -- <"message"> (or --stdin, --file <path>, --base64 <string>)
   Example: {hcom_cmd} send {target_luna} {target_nova} --intent ack --reply-to 82 --name {subagent_name} -- "ok"  |  Code/markdown: replace "ok" with --file <path>
   {hcom_cmd} list --name {subagent_name}
+  {hcom_cmd} doing 'short description' --name {subagent_name}   (what you are working on)
   {hcom_cmd} events --name {subagent_name}
   {hcom_cmd} <cmd> --help --name {subagent_name}
 

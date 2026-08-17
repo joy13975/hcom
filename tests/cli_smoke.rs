@@ -1165,3 +1165,74 @@ fn pi_e2e_hook_dispatch() {
         .unwrap_or_else(|| panic!("stopped event missing: {stdout}"));
     assert_eq!(stopped["data"]["action"].as_str(), Some("stopped"));
 }
+
+#[test]
+fn doing_is_set_read_and_seen_by_peers() {
+    let h = Hcom::new();
+    let me = h.start();
+
+    // Nothing set yet: say so, and say how to set it.
+    let (code, stdout, stderr) = h.run(["doing", "--name", &me]);
+    assert_eq!(code, 0, "doing (empty) stderr={stderr}");
+    assert!(stdout.contains("nothing set"), "stdout={stdout}");
+    assert!(stdout.contains("hcom doing"), "stdout={stdout}");
+
+    let (code, stdout, stderr) = h.run(["doing", "--name", &me, "refactoring the auth layer"]);
+    assert_eq!(code, 0, "doing (set) stderr={stderr}");
+    assert!(
+        stdout.contains("refactoring the auth layer"),
+        "stdout={stdout}"
+    );
+
+    // Readable back by the setter.
+    let (_, stdout, _) = h.run(["doing", "--name", &me]);
+    assert!(
+        stdout.contains("refactoring the auth layer"),
+        "stdout={stdout}"
+    );
+
+    // And visible to anyone reading the roster — the point of the feature.
+    let (code, stdout, stderr) = h.run(["list", "--json"]);
+    assert_eq!(code, 0, "list --json stderr={stderr}");
+    let agents: serde_json::Value =
+        serde_json::from_str(&stdout).unwrap_or_else(|e| panic!("list json: {e}\n{stdout}"));
+    let mine = agents
+        .as_array()
+        .and_then(|a| a.iter().find(|v| v["base_name"] == me.as_str()))
+        .unwrap_or_else(|| panic!("{me} missing from list: {stdout}"));
+    assert_eq!(
+        mine["doing"].as_str(),
+        Some("refactoring the auth layer"),
+        "list json={stdout}"
+    );
+
+    let (_, stdout, _) = h.run(["list", "--format", "{name} {doing}"]);
+    assert!(
+        stdout.contains("refactoring the auth layer"),
+        "stdout={stdout}"
+    );
+
+    // Latest write wins.
+    let (code, _, stderr) = h.run(["doing", "--name", &me, "now writing tests"]);
+    assert_eq!(code, 0, "doing (update) stderr={stderr}");
+    let (_, stdout, _) = h.run(["list", "--format", "{doing}"]);
+    assert!(stdout.contains("now writing tests"), "stdout={stdout}");
+    assert!(
+        !stdout.contains("refactoring"),
+        "stale value retained: {stdout}"
+    );
+
+    // Empty string clears it.
+    let (code, _, stderr) = h.run(["doing", "--name", &me, ""]);
+    assert_eq!(code, 0, "doing (clear) stderr={stderr}");
+    let (_, stdout, _) = h.run(["doing", "--name", &me]);
+    assert!(stdout.contains("nothing set"), "stdout={stdout}");
+}
+
+#[test]
+fn doing_rejects_an_unregistered_agent() {
+    let h = Hcom::new();
+    // Recording activity for a name nobody can look up would be a silent no-op.
+    let (code, stdout, stderr) = h.run(["doing", "--name", "ghost", "something"]);
+    assert_ne!(code, 0, "expected failure; stdout={stdout} stderr={stderr}");
+}

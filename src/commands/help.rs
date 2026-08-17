@@ -151,7 +151,7 @@ const LIST_HELP: &[HelpEntry] = &[
     ),
     (
         "",
-        "  status_age_seconds, description, unread_count, tool, tag, directory,",
+        "  status_age_seconds, description, doing, unread_count, tool, tag, directory,",
     ),
     (
         "",
@@ -364,6 +364,16 @@ const BUNDLE_HELP: &[HelpEntry] = &[
     ("", ""),
     ("bundle chain <id>", "Show bundle lineage"),
     ("  --json", "Output JSON"),
+];
+
+const DOING_HELP: &[HelpEntry] = &[
+    ("doing \"<text>\"", "Say what you are working on"),
+    ("doing", "Show what you last said you were working on"),
+    ("doing \"\"", "Clear it"),
+    ("", ""),
+    ("", "Other agents see it in hcom list and hcom list <name>."),
+    ("", "Survives hook status updates, unlike status_detail."),
+    ("", ""),
 ];
 
 const STOP_HELP: &[HelpEntry] = &[
@@ -915,6 +925,7 @@ Commands:\n\
   send         Send message to your buddies\n\
   listen       Block until message or event arrives\n\
   list         Show agents, status, unread counts\n\
+  doing        Say what you are working on (others see it in list)\n\
   events       Query event stream, manage subscriptions\n\
   bundle       Structured context packages for handoffs\n\
   transcript   Read another agent's conversation\n\
@@ -1031,6 +1042,7 @@ pub fn get_command_help(name: &str) -> String {
 
     let entries: Option<&[HelpEntry]> = match name {
         "list" => Some(LIST_HELP),
+        "doing" => Some(DOING_HELP),
         "send" => Some(SEND_HELP),
         "bundle" => Some(BUNDLE_HELP),
         "stop" => Some(STOP_HELP),

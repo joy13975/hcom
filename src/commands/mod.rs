@@ -16,6 +16,7 @@ pub mod stop;
 
 // Diagnostics
 pub mod bundle;
+pub mod doing;
 pub mod events;
 pub mod list;
 pub mod status;

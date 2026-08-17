@@ -53,6 +53,18 @@ pub struct ListArgs {
 }
 
 /// Get unread message count for a single instance.
+/// Truncate display text at a char boundary, appending an ellipsis when cut.
+fn truncate_display(text: &str, max: usize) -> String {
+    if text.len() <= max {
+        return text.to_string();
+    }
+    let end = (0..=max)
+        .rev()
+        .find(|&i| text.is_char_boundary(i))
+        .unwrap_or(0);
+    format!("{}...", &text[..end])
+}
+
 fn get_unread_count(db: &HcomDb, name: &str, last_event_id: i64) -> i64 {
     db.conn()
         .query_row(
@@ -222,6 +234,8 @@ pub fn cmd_list(db: &HcomDb, args: &ListArgs, ctx: Option<&CommandContext>) -> i
 
     if json_output || format_template.is_some() {
         let mut result_list: Vec<serde_json::Value> = Vec::new();
+        // One query for the whole listing rather than one per agent.
+        let doing_map = db.get_doing_map();
 
         for data in &sorted_instances {
             let full_name = get_full_name(data);
@@ -247,6 +261,7 @@ pub fn cmd_list(db: &HcomDb, args: &ListArgs, ctx: Option<&CommandContext>) -> i
                 "status_detail": data.status_detail,
                 "status_age_seconds": age_seconds,
                 "description": description,
+                "doing": doing_map.get(&data.name).cloned().unwrap_or_default(),
                 "unread_count": unread_counts.get(&data.name).copied().unwrap_or(0),
                 "headless": data.background != 0,
                 "session_id": data.session_id.as_deref().unwrap_or(""),
@@ -365,6 +380,8 @@ pub fn cmd_list(db: &HcomDb, args: &ListArgs, ctx: Option<&CommandContext>) -> i
         max_name_len = max_name_len.max(n);
     }
     let name_col_width = (max_name_len + 2).max(14);
+    // One query for the whole listing rather than one per agent.
+    let doing_map = db.get_doing_map();
 
     for data in &sorted_instances {
         let name = get_full_name(data);
@@ -452,9 +469,17 @@ pub fn cmd_list(db: &HcomDb, args: &ListArgs, ctx: Option<&CommandContext>) -> i
             String::new()
         };
 
+        // Self-reported activity, so a glance at the roster shows what each
+        // agent is working on and not merely whether it is awake.
+        let doing_text = match doing_map.get(&data.name) {
+            Some(doing) if !doing.is_empty() => format!(" - {}", truncate_display(doing, 50)),
+            _ => String::new(),
+        };
+
         let name_part = format!("{name}{headless_badge}{remote_badge}{unread_str}");
-        let status_text =
-            format!("{age_display}{desc_sep}{description}{listening_since}{timeout_marker}");
+        let status_text = format!(
+            "{age_display}{desc_sep}{description}{listening_since}{timeout_marker}{doing_text}"
+        );
 
         println!(
             "{tool_prefix}{icon} {name_part:<width$}{status_text}",
@@ -531,16 +556,14 @@ pub fn cmd_list(db: &HcomDb, args: &ListArgs, ctx: Option<&CommandContext>) -> i
             println!("    transcript:   {transcript}");
 
             if !data.status_detail.is_empty() {
-                let detail = if data.status_detail.len() > 60 {
-                    let end = (0..=60)
-                        .rev()
-                        .find(|&i| data.status_detail.is_char_boundary(i))
-                        .unwrap_or(0);
-                    format!("{}...", &data.status_detail[..end])
-                } else {
-                    data.status_detail.clone()
-                };
-                println!("    detail:       {detail}");
+                println!(
+                    "    detail:       {}",
+                    truncate_display(&data.status_detail, 60)
+                );
+            }
+            // Untruncated here: -v is where you go for the full text.
+            if let Some(doing) = doing_map.get(&data.name).filter(|d| !d.is_empty()) {
+                println!("    doing:        {doing}");
             }
             println!();
         }
@@ -605,6 +628,13 @@ fn print_instance_details(db: &HcomDb, data: &InstanceRow, display_name: &str) {
     };
 
     println!("{display_name}:");
+
+    // What the agent says it is working on, ahead of the mechanical fields:
+    // it is the first thing a peer inspecting this agent wants.
+    let doing = db.get_doing(&data.name);
+    if !doing.is_empty() {
+        println!("  Doing:       {doing}");
+    }
 
     // Core Identity
     let headless_str = if data.background != 0 {

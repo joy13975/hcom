@@ -1060,6 +1060,18 @@ fn build_agent_detail(agent: &Agent, app: &App, lines: &mut Vec<Line<'static>>, 
     finalize_detail_spans(&mut info, w);
     lines.push(Line::from(info));
 
+    // Line 3 (when set): what the agent says it is working on. Its own line
+    // because it is free text an agent wrote, not a fixed-width status field.
+    if let Some(doing) = app.data.doing.get(&agent.name).filter(|d| !d.is_empty()) {
+        let mut activity: Vec<Span<'static>> = vec![
+            Span::raw("  "),
+            Span::styled("doing: ", Theme::separator()),
+            Span::styled(doing.clone(), Theme::agent_context()),
+        ];
+        finalize_detail_spans(&mut activity, w);
+        lines.push(Line::from(activity));
+    }
+
     // Separator line
     let dashes = "\u{254c}".repeat(w.saturating_sub(4) as usize);
     lines.push(Line::from(vec![
